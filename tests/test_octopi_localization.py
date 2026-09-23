@@ -20,6 +20,7 @@ def test_radius_units_and_typed_command(config):
     argv=list(map(str,job.get_commands()[0].cmd))
     assert argv[argv.index('--conversion-backend')+1]=='octopi'
     assert '--min-particle-size' not in argv and '--max-particle-size' not in argv
+    assert '--merge-close-picks' not in argv and '--min-separation-a' not in argv
     assert argv[argv.index('--maxima-filter-size')+1]=='10'
     assert argv[argv.index('--conversion-workers')+1]=='0'   # 0 = automatic (memory- and volume-bounded); a positive value is used exactly
 
@@ -91,3 +92,38 @@ def test_report_rejects_partial_or_wrong_output(config,damage):
     if damage=='wrong_source':report['source_session']='job005'
     path=config.parent/'report.json';path.write_text(json.dumps(report))
     with pytest.raises(ValueError):contract.validate_report(path,config=config,runs=['one'],model='ribosome',source_session='job006',output_session='job099')
+
+@pytest.mark.parametrize('method', ['com', 'watershed'])
+def test_octopi_keeps_its_native_merge_and_passes_memory_bound(config, monkeypatch, tmp_path, method):
+    """A legacy merge request must never change the scientifically distinct Octopi output."""
+    monkeypatch.setattr(orchestrate, 'snap_voxel_size', lambda c, v: v)
+    monkeypatch.setattr(orchestrate, 'validate_reuse', lambda **kw: {'inference_skipped': True})
+    monkeypatch.setattr(orchestrate.shard, 'run_easymode_sharded', lambda **kw: pytest.fail('inference called'))
+    monkeypatch.setattr(orchestrate, 'tomogram_voxels', lambda *a: 1022 * 1440 * 400)
+    monkeypatch.setattr(orchestrate, 'job_memory_limit_bytes', lambda: 128 * 1024**3)
+    monkeypatch.setattr(contract.shard, 'copick_interpreter', lambda exe: '/opt/tools/octopi/bin/python')
+    monkeypatch.setattr(contract, 'validate_report', lambda *a, **kw: {'status': 'complete'})
+    monkeypatch.setattr(orchestrate.dedupe, 'merge_project_picks', lambda *a, **kw: pytest.fail('legacy merge changed Octopi picks'))
+    monkeypatch.setattr(orchestrate, 'export_copick_picks', lambda **kw: kw)
+    monkeypatch.setattr(orchestrate, '_project_tilt_pixel_size', lambda c: 2.5)
+    class Recorder:
+        dry_run = False
+        def __init__(self): self.log = []
+        def run(self, argv): self.log.append(argv)
+    runner = Recorder()
+    result = orchestrate.easymode(
+        config=config, out_dir=tmp_path/'AutoPick/job099', session_id='job099',
+        models=['ribosome'], tomo_type='wbp', voxel_a=10.005, runs=['one'],
+        tta=4, threshold=.5, batch_size=1, maxima_filter_size=10,
+        min_particle_size=1000, max_particle_size=50000, layout='import_centered',
+        gpus=None, use_gpu=False, threads=64, runner=runner,
+        reuse_segmentation_session='job006', conversion_workers=0,
+        conversion_backend='octopi', localization_method=method,
+        merge_close_picks=True, min_separation_a=210)
+    assert len(runner.log) == 1
+    argv = runner.log[0]
+    assert argv[argv.index('--workers') + 1] == '5'
+    assert argv[argv.index('--method') + 1] == method
+    assert result['picks_uri'] == 'ribosome:easymode/job099'
+    assert result['source']['merge_close_picks']['enabled'] is False
+    assert result['source']['localization']['objects']['ribosome']['merge_distance_a'] == 75

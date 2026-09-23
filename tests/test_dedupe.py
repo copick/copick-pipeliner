@@ -73,6 +73,7 @@ def test_job_and_cli_forward_the_merge_controls(fake_executables, monkeypatch, t
     from pipeliner.job_factory import new_job_of_type
 
     job = new_job_of_type("copick.easymode")
+    job.joboptions["conversion_backend"].value = "legacy_seg2picks"
     job.output_dir = "AutoPick/job005/"
     job.joboptions["copick_config"].value = "Copick/job003/copick_config.json"
     job.joboptions["voxel_size"].value = 8.66

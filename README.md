@@ -10,13 +10,14 @@ like any RELION job.
 |---|---|---|
 | `copick.project` | copick project (config + tomograms) from a RELION `tomograms.star` **or** a cryoET Data Portal dataset mirror | CPU |
 | `copick.portalpicks` | deposited portal annotations of one object → copick picks → `particles.star` (ground-truth fallback / reference) | CPU |
-| `copick.easymode` | copick-easymode segmentation → copick-utils `seg2picks` → `particles.star` | GPU (TensorFlow) |
+| `copick.easymode` | copick-easymode segmentation → Octopi radius-aware localization → `particles.star` | GPU (TensorFlow) |
 | `copick.boundary` | octopi `tomogram-boundary` (specimen vs vacuum) → keep picks inside the specimen → `particles.star` | GPU (torch) |
 | `copick.membrain` | MemBrain-seg membranes via copick-torch → `segmentations.json` | GPU (torch) |
 
 ## Two halves, two environments
 
-* **Job classes** (`copick_pipeliner.jobs`) import only `pipeliner` and the standard library.
+* **Job classes** (`copick_pipeliner.jobs`) need the base package dependencies, without
+  copick or either ML framework.
   They load in the pipeliner control process (ApexAgent's venv) and turn joboptions into one
   `copick-pipeliner-tools <verb> ...` command line.
 * **Tools** (`copick_pipeliner.tools`, console script `copick-pipeliner-tools`) run where the
@@ -46,14 +47,56 @@ like any RELION job.
 * **Objects** are registered once by `copick.project`; every later command runs with
   `--no-add-objects`.
 
-## Status (2026-09-22, P0)
+## Localization and reuse (0.1.12)
 
-Deterministic path implemented and tested without copick: job classes and entry points,
-coordinate conventions, portal reader, `copick.portalpicks` export, manifests, argv
-composition for every external CLI. Verified on the real 10426/tomo153 mirror (357 oriented
-ribosomes, deposition 10358). The ML verbs (`easymode`, `boundary`, `membrain`) and the copick
-storage paths are written but marked **VERIFY-P2** until run against the installed tools.
+`copick.easymode` defaults to `conversion_backend=octopi`, using the installed
+Octopi `extract_coordinates` implementation (validated with Octopi 1.7.0).
+`localization_method=watershed` separates touching regions; `com` uses connected-component
+centers of mass. Both use the particle radius from the Copick configuration, spherical
+volume filtering, nearby-centroid merging, and Octopi's border rejection. For a ribosome
+radius of 150 Å, `radius_min_scale=0.5` and `radius_max_scale=1.0` give a 75–150 Å
+radius range and a 75 Å centroid-merge distance. `maxima_filter_size=10` is used by
+watershed only. Coordinates from Octopi are converted from ZYX voxels to XYZ Å once.
+Each conversion records the actual Octopi version, algorithm source hash, parameters,
+and per-run success or explicit empty output in `octopi-localization-<object>.json`.
+
+Set `conversion_backend=legacy_seg2picks` for the older integer-volume converter.
+Its `min_particle_size`, `max_particle_size`, `merge_close_picks`, and
+`min_separation_a` settings apply only to that backend. The optional legacy merge
+uses 0.7 × object diameter by default (210 Å for a 150 Å ribosome radius); it is
+**never applied after Octopi localization**. To reproduce pre-merge jobs, also set
+`merge_close_picks=No` and `maxima_filter_size=9`.
+
+Install `copick-pipeliner[copick]` in the Octopi environment as well as the controller
+and Easymode/tool environments. `PIPELINER_OCTOPI_EXECUTABLE` selects the Octopi
+executable; the adapter runs in its associated Python environment. The independent
+TensorFlow and torch environments can therefore share the same job plugin without
+combining the frameworks. Octopi is a separate runtime dependency; installing this
+package alone does not install the ML tools or their weights.
+
+For a new conversion of existing segmentations, set
+`reuse_segmentation_session=<prior job session>` on a fresh `copick.easymode` job.
+The old sibling job's completed inference manifest, requested runs/models/settings,
+and stored array metadata must match. Inference is skipped; missing or inconsistent
+sources fail without fallback. `conversion_workers=0` retains the automatic memory
+estimate; an explicit positive number caps concurrent whole-volume conversions
+independently of inference threads. The production conversion trials used 2 workers.
+
+`copick.boundary` similarly accepts `reuse_boundary_session=<prior job session>`.
+It verifies a successful sibling boundary job and matching binary sample masks, then
+filters the new picks without rerunning boundary inference or tomogram rescaling.
+Source masks and segmentations remain unchanged; outputs use the new job's session.
+
+Both Octopi methods and boundary reuse were exercised in eight full dataset trials.
+Localization changes can affect crowding and particle yield; these trials do not
+establish one method as universally best. Reuse verification checks completion evidence
+and array metadata, not a checksum of every stored voxel.
 
 ```bash
-python -m pytest -q          # needs ccpem-pipeliner, numpy, scipy, pandas, starfile, click
+pip install -e '.[copick,dev]'
+python -m pytest -q
+pip wheel --no-deps . -w dist
 ```
+
+The default tests use small synthetic inputs; tests requiring the local Portal mirror
+or RELION skip when those resources are unavailable.

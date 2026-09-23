@@ -1,8 +1,8 @@
-"""``copick.easymode``: copick-easymode segmentation -> seg2picks -> ``particles.star``.
+"""``copick.easymode``: segmentation -> radius-aware localization -> ``particles.star``.
 
 Runs ``copick inference easymode`` (pretrained easymode models, TensorFlow) on the
 project's tomograms at the stated voxel size, converts each requested model's binary
-segmentation to picks with copick-utils ``convert seg2picks``, and exports the picks
+segmentation to picks with Octopi (or explicit legacy seg2picks), and exports the picks
 with identity orientations (an initialisation, not a measurement -- the manifest says so).
 GPU job; belongs in the picking execution image.
 """
@@ -112,20 +112,22 @@ class CopickEasymodeJob(CopickJobBase):
             is_required=True,
         )
         self.joboptions["merge_close_picks"] = BooleanJobOption(
-            label="Merge picks closer than one particle?",
+            label="Merge nearby legacy seg2picks?",
             default_value=True,
+            deactivate_if=JobOptionCondition([("conversion_backend", "!=", "legacy_seg2picks")]),
             help_text="seg2picks yields one centroid per watershed fragment; a fragmented prediction of one particle gives several picks inside it. Merge picks closer than the minimum separation into one centre (cluster mean). The raw set is kept.",
         )
         self.joboptions["min_separation_a"] = FloatJobOption(
-            label="Minimum pick separation (A, 0 = 0.7 x object diameter):",
+            label="Legacy minimum pick separation (A, 0 = 0.7 x object diameter):",
             default_value=0.0,
+            deactivate_if=JobOptionCondition([("conversion_backend", "!=", "legacy_seg2picks")]),
             hard_min=0.0,
             step_value=10.0,
             help_text="Picks closer than this are merged. 0 derives it from the copick object's radius (ribosome r=150 A -> 210 A).",
             is_required=True,
         )
         self.joboptions["conversion_workers"] = IntJobOption(
-            label="seg2picks workers (0 = automatic):",
+            label="Localization workers (0 = automatic):",
             default_value=0,
             hard_min=0,
             help_text="Parallel segmentation-to-picks conversions. 0 bounds them by the job's memory and the volume size; a positive number is used as given.",
@@ -168,8 +170,9 @@ class CopickEasymodeJob(CopickJobBase):
         args += ["--layout", jo["star_layout"].get_string()]
         args += self.gpu_args()
         args += ["--conversion-workers", jo["conversion_workers"].get_string()]
-        args += ["--merge-close-picks" if jo["merge_close_picks"].get_boolean() else "--no-merge-close-picks"]
-        args += ["--min-separation-a", jo["min_separation_a"].get_string()]
+        if backend == "legacy_seg2picks":
+            args += ["--merge-close-picks" if jo["merge_close_picks"].get_boolean() else "--no-merge-close-picks"]
+            args += ["--min-separation-a", jo["min_separation_a"].get_string()]
         source = validate_session(jo["reuse_segmentation_session"].get_string())
         if source:
             args += ["--reuse-segmentation-session", source]
