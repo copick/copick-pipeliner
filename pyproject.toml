@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "copick-pipeliner"
+version = "0.1.11"
+description = "ccpem-pipeliner job types for copick-based particle picking on cryo-ET tomograms (copick-easymode, octopi boundary cleanup, MemBrain-seg, portal picks) and their export to RELION 5 particle STAR files."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Utz Ermel" }]
+# What the job classes need at import time. copick itself is deliberately NOT a dependency:
+# the classes are loaded by the pipeliner control process (ApexAgent's venv), while the
+# copick / octopi / easymode CLIs run in their own environments and are reached through
+# PIPELINER_COPICK_EXECUTABLE / PIPELINER_OCTOPI_EXECUTABLE (see copick_pipeliner.settings).
+dependencies = [
+    "ccpem-pipeliner>=1.6",
+    "numpy",
+    "scipy",
+    "pandas",
+    "starfile>=0.5",
+    "click>=8",
+]
+
+[project.optional-dependencies]
+# The environment the `copick-pipeliner-tools` CLI runs in (picking image / host venv).
+copick = ["copick>=1.26", "copick-utils>=1.8"]
+dev = ["pytest"]
+
+[project.scripts]
+copick-pipeliner-tools = "copick_pipeliner.tools.cli:main"
+
+[project.entry-points."ccpem_pipeliner.jobs"]
+"copick.project" = "copick_pipeliner.jobs.project:CopickProjectJob"
+"copick.portalpicks" = "copick_pipeliner.jobs.portalpicks:CopickPortalPicksJob"
+"copick.easymode" = "copick_pipeliner.jobs.easymode:CopickEasymodeJob"
+"copick.boundary" = "copick_pipeliner.jobs.boundary:CopickBoundaryJob"
+"copick.membrain" = "copick_pipeliner.jobs.membrain:CopickMembrainJob"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/copick_pipeliner"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
