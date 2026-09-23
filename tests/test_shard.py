@@ -109,7 +109,7 @@ def _fake_copick(bin_dir: Path, *, fail_on: str | None = None, sleep: float = 0.
 def test_dry_run_plans_one_worker_per_gpu_with_the_same_session_and_no_gpus_flag(fake_executables, tmp_path):
     config, _ = _project(tmp_path, runs=("a", "b", "c", "d", "e"))
     runner = external.Runner(dry_run=True)
-    result = orchestrate.easymode(
+    result = orchestrate.easymode(conversion_backend="legacy_seg2picks", 
         config=config, out_dir=tmp_path / "AutoPick/job007", session_id="job007", models=["ribosome"], tomo_type="wbp", voxel_a=10.0,
         runs=None, tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000,
         layout="import_centered", gpus=None, use_gpu=True, threads=None, runner=runner, shard_hooks={"env": FOUR, "probe": lambda: [], "bootstrap": "off"})
@@ -126,13 +126,13 @@ def test_dry_run_plans_one_worker_per_gpu_with_the_same_session_and_no_gpus_flag
     assert [a[0] for a in runner.log] == ["<worker>"] * 4 + [fake_executables.joinpath("copick").as_posix()]   # then seg2picks
     assert runner.log[4][1:3] == ["convert", "seg2picks"]
     # A cap and an explicit subset are honoured; a single GPU is the old serial command shape.
-    capped = orchestrate.easymode(
+    capped = orchestrate.easymode(conversion_backend="legacy_seg2picks", 
         config=config, out_dir=tmp_path / "AutoPick/job008", session_id="job008", models=["ribosome"], tomo_type="wbp", voxel_a=10.0,
         runs=["a", "b", "c"], tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000,
         layout="import_centered", gpus="1,3", use_gpu=True, threads=None, runner=external.Runner(dry_run=True), max_workers=1,
         shard_hooks={"env": FOUR, "probe": lambda: [], "bootstrap": "off"})
     assert [w["gpu"] for w in capped["shards"]["workers"]] == ["1"] and capped["shards"]["workers"][0]["runs"] == ["a", "b", "c"]
-    cpu = orchestrate.easymode(
+    cpu = orchestrate.easymode(conversion_backend="legacy_seg2picks", 
         config=config, out_dir=tmp_path / "AutoPick/job009", session_id="job009", models=["ribosome"], tomo_type="wbp", voxel_a=10.0,
         runs=["a"], tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000,
         layout="import_centered", gpus=None, use_gpu=False, threads=None, runner=external.Runner(dry_run=True),
@@ -176,7 +176,7 @@ def test_a_failed_worker_stops_the_job_before_seg2picks_and_export(tmp_path, mon
     runner = external.Runner(dry_run=False)
     env = {"CUDA_VISIBLE_DEVICES": "0,1", "SLURM_CPUS_PER_TASK": "8", "PATH": os.environ["PATH"]}
     with pytest.raises(shard.ShardError, match=r"worker\(s\) 1 \(gpu 1, exit 1.*failed"):
-        orchestrate.easymode(
+        orchestrate.easymode(conversion_backend="legacy_seg2picks", 
             config=config, out_dir=tmp_path / "AutoPick/job007", session_id="job007", models=["ribosome"], tomo_type="wbp", voxel_a=10.0,
             runs=None, tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000,
             layout="import_centered", gpus=None, use_gpu=True, threads=None, runner=runner,
@@ -268,7 +268,7 @@ def test_a_star_derived_voxel_size_is_snapped_to_the_projects_stored_spacing(tmp
     assert orchestrate.snap_voxel_size(config, 8.66) == 8.66                                  # nothing near: unchanged
     assert shard.complete_runs(config, ["run_a"], ["ribosome"], user_id="easymode", session_id="job007", voxel_a=10.005) == {"run_a"}
     # Through the orchestration: the dry-run plan is made at the stored spacing and records both values.
-    result = orchestrate.easymode(
+    result = orchestrate.easymode(conversion_backend="legacy_seg2picks", 
         config=config, out_dir=tmp_path / "AutoPick/job007", session_id="job007", models=["ribosome"], tomo_type="wbp", voxel_a=requested,
         runs=None, tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000,
         layout="import_centered", gpus=None, use_gpu=True, threads=None, runner=external.Runner(dry_run=True),
@@ -295,7 +295,7 @@ def test_every_picking_verb_snaps_the_requested_sampling_first(tmp_path, monkeyp
     config, _ = _project(tmp_path, runs=("run_a",), voxel=10.005)
     requested = 7.46085 * 1.341
     common = dict(config=config, session_id="job008", tomo_type="wbp", voxel_a=requested, runs=["run_a"], gpus=None, use_gpu=True)
-    orchestrate.easymode(out_dir=tmp_path / "AutoPick/job008", models=["ribosome"], tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9,
+    orchestrate.easymode(conversion_backend="legacy_seg2picks", out_dir=tmp_path / "AutoPick/job008", models=["ribosome"], tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9,
                          min_particle_size=1000, max_particle_size=50000, layout="import_centered", threads=None,
                          runner=external.Runner(dry_run=True), shard_hooks={"env": {"CUDA_VISIBLE_DEVICES": "0"}, "probe": lambda: [], "bootstrap": "off"}, **common)
     picks_dir = tmp_path / "AutoPick/job008"
@@ -329,7 +329,7 @@ def test_seg2picks_workers_are_bounded_by_memory_and_volume_size(tmp_path, monke
     orchestrate.easymode(
         config=config, out_dir=tmp_path / "AutoPick/job006", session_id="job006", models=["ribosome"], tomo_type="wbp", voxel_a=8.66, runs=None,
         tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000, layout="import_centered",
-        gpus=None, use_gpu=True, threads=64, runner=runner, shard_hooks={"env": {"CUDA_VISIBLE_DEVICES": "0"}, "probe": lambda: [], "bootstrap": "off"})
+        gpus=None, use_gpu=True, threads=64, runner=runner, conversion_backend="legacy_seg2picks", shard_hooks={"env": {"CUDA_VISIBLE_DEVICES": "0"}, "probe": lambda: [], "bootstrap": "off"})
     seg2picks = next(a for a in runner.log if a[1:3] == ["convert", "seg2picks"])
     assert seg2picks[seg2picks.index("--workers") + 1] == "20"
 

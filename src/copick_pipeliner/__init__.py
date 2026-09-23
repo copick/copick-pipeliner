@@ -17,4 +17,4 @@ control process without copick, TensorFlow or torch. All scientific work happens
 environment and shells out to ``copick`` / ``octopi``.
 """
 
-__version__ = "0.1.11"
+__version__ = "0.1.12"

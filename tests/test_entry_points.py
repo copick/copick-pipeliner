@@ -104,6 +104,7 @@ def test_portalpicks_command_names_the_attempt_and_layout(fake_executables):
 
 def test_easymode_command_carries_gpu_and_seg2picks_settings(fake_executables):
     job = new_job_of_type("copick.easymode")
+    job.joboptions["conversion_backend"].value="legacy_seg2picks"
     job.output_dir = "AutoPick/job005/"
     job.joboptions["copick_config"].value = "Copick/job003/copick_config.json"
     job.joboptions["voxel_size"].value = 8.66

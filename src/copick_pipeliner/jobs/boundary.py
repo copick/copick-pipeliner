@@ -14,6 +14,7 @@ from pipeliner.job_options import FileDescription, FloatJobOption, InputNodeJobO
 from pipeliner.nodes import NODE_PARTICLEGROUPMETADATA
 
 from ._common import CopickJobBase
+from copick_pipeliner.tools.segmentation_reuse import validate_session
 
 
 class CopickBoundaryJob(CopickJobBase):
@@ -57,6 +58,11 @@ class CopickBoundaryJob(CopickJobBase):
             help_text="octopi segment --ntta.",
             is_required=True,
         )
+        self.joboptions["reuse_boundary_session"] = StringJobOption(
+            label="Reuse completed boundary-mask session:", default_value="",
+            help_text="Empty computes a new boundary. A safe prior session token requires successful matching sample masks for every selected run and skips rescaling/inference/label isolation; no fallback.",
+            is_required=False,
+        )
         self.add_runs_option()
         self.add_layout_option()
         self.add_gpu_options()
@@ -78,4 +84,7 @@ class CopickBoundaryJob(CopickJobBase):
         args += self.runs_args()
         args += ["--layout", jo["star_layout"].get_string()]
         args += self.gpu_args()
+        source = validate_session(jo["reuse_boundary_session"].get_string())
+        if source:
+            args += ["--reuse-boundary-session", source]
         return [self.tool_command(args)]

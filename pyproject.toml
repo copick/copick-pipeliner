@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "copick-pipeliner"
-version = "0.1.11"
+version = "0.1.12"
 description = "ccpem-pipeliner job types for copick-based particle picking on cryo-ET tomograms (copick-easymode, octopi boundary cleanup, MemBrain-seg, portal picks) and their export to RELION 5 particle STAR files."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -173,7 +173,7 @@ def test_dry_run_plan_uses_the_bootstrap_when_the_interpreter_can_import_it(tmp_
     result = orchestrate.easymode(
         config=config, out_dir=tmp_path / "AutoPick/job007", session_id="job007", models=["ribosome"], tomo_type="wbp", voxel_a=10.0, runs=None,
         tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000, layout="import_centered",
-        gpus=None, use_gpu=True, threads=None, runner=external.Runner(dry_run=True),
+        gpus=None, use_gpu=True, threads=None, runner=external.Runner(dry_run=True), conversion_backend="legacy_seg2picks",
         shard_hooks={"env": {"CUDA_VISIBLE_DEVICES": "0,1"}, "probe": lambda: []})
     plan = result["shards"]
     assert plan["bootstrap"].startswith("locked easymode import via")
