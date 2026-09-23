@@ -99,5 +99,5 @@ def test_dry_run_reports_the_planned_merge_and_the_merged_uri(tmp_path):
     result = orchestrate.easymode(
         config=config, out_dir=tmp_path / "AutoPick/job006", session_id="job006", models=["ribosome"], tomo_type="wbp", voxel_a=10.0, runs=None,
         tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000, layout="import_centered",
-        gpus=None, use_gpu=False, threads=None, runner=external.Runner(dry_run=True), shard_hooks={"env": {}, "probe": lambda: [], "bootstrap": "off"})
+        gpus=None, use_gpu=False, threads=None, runner=external.Runner(dry_run=True), conversion_backend="legacy_seg2picks", shard_hooks={"env": {}, "probe": lambda: [], "bootstrap": "off"})
     assert result["picks_uri"] == "ribosome:easymode/job006" and result["merge_close_picks"]["note"].startswith("dry run")

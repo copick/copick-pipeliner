@@ -14,8 +14,9 @@ from pathlib import Path
 
 import numpy as np
 
-from . import dedupe, external, portal_annotations as portal, shard
-from .segmentation_reuse import validate_reuse, validate_session
+from . import dedupe, external, octopi_localization, portal_annotations as portal, shard
+from .segmentation_reuse import validate_boundary_reuse, validate_reuse, validate_session
+from .. import settings
 from .export_star import PICKS_MANIFEST, export_copick_picks, export_portal_picks
 from .export_star import map_runs as export_map_runs
 from .manifest import new_manifest, read_manifest, sibling_manifest, write_manifest
@@ -683,6 +684,7 @@ def easymode(
     threads: int | None, runner: external.Runner, max_workers: int | None = None, shard_hooks: dict | None = None,
     conversion_workers: int | None = None, reuse_segmentation_session: str = "",
     merge_close_picks: bool = True, min_separation_a: float = 0.0,
+    conversion_backend: str = "octopi", localization_method: str = "watershed", radius_min_scale: float = 0.5, radius_max_scale: float = 1.0,
 ) -> dict:
     """easymode segmentation of every model (one worker per allocated GPU, see ``shard``),
     seg2picks per model, one STAR of the first model. Any incomplete inference raises before
@@ -699,12 +701,22 @@ def easymode(
     if isinstance(conversion_workers, bool) or (conversion_workers is not None and (not isinstance(conversion_workers, int) or conversion_workers < 0)):
         raise ValueError("conversion_workers must be a positive integer, or 0/None for automatic")
     explicit_workers = conversion_workers or None
+    if conversion_backend not in octopi_localization.BACKENDS:
+        raise ValueError("Unknown conversion_backend")
     source_session = validate_session(reuse_segmentation_session) or session_id
     requested_voxel_a = float(voxel_a)
     voxel_a = snap_voxel_size(config, voxel_a)
     selected = runs or sorted(read_project_manifest(config).get("runs", {}))
     if not selected:
         raise ValueError(f"no runs to segment: none given and the project manifest beside {config} lists none")
+    localization = {"backend": conversion_backend}
+    if conversion_backend == "octopi":
+        localization.update(method=localization_method, executable=settings.octopi_exe(),
+            objects=octopi_localization.radius_settings(config, models, voxel_a, localization_method, radius_min_scale, radius_max_scale, maxima_filter_size),
+            reports={}, inactive_legacy_options=["min_particle_size", "max_particle_size"])
+    else:
+        localization.update(maxima_filter_size=maxima_filter_size, min_particle_size=min_particle_size, max_particle_size=max_particle_size)
+
 
     def argv_for(shard_runs: list[str]) -> list[str]:
         # No --gpus for a worker: its CUDA_VISIBLE_DEVICES is set in its environment (shard.worker_env).
@@ -742,17 +754,36 @@ def easymode(
         recovery["conversion_workers"] = seg2picks_workers
     print(f"seg2picks: {seg2picks_workers} worker(s) ({seg2picks_accounting})", flush=True)
     for model in models:
-        runner.run(external.seg2picks_argv(
-            config=str(config), seg_name=model, seg_user=user, seg_session=source_session, voxel_a=voxel_a,
-            out_name=model, out_user=user, out_session=session_id, runs=runs,
-            maxima_filter_size=maxima_filter_size, min_particle_size=min_particle_size,
-            max_particle_size=max_particle_size, workers=seg2picks_workers))
+        if conversion_backend == "legacy_seg2picks":
+            runner.run(external.seg2picks_argv(
+                config=str(config), seg_name=model, seg_user=user, seg_session=source_session, voxel_a=voxel_a,
+                out_name=model, out_user=user, out_session=session_id, runs=runs,
+                maxima_filter_size=maxima_filter_size, min_particle_size=min_particle_size,
+                max_particle_size=max_particle_size, workers=seg2picks_workers))
+        else:
+            if not model or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in model):
+                raise ValueError("Octopi object name must be a safe model token")
+            report_path = Path(out_dir) / f"octopi-localization-{model}.json"
+            runner.run(octopi_localization.adapter_argv(
+                config=config, report=report_path, runs=selected, model=model,
+                source_session=source_session, output_session=session_id, voxel_a=voxel_a,
+                method=localization_method, min_scale=radius_min_scale, max_scale=radius_max_scale,
+                filter_size=maxima_filter_size, workers=max(1, int(seg2picks_workers or 1))))
+            if not runner.dry_run:
+                localization["reports"][model] = octopi_localization.validate_report(
+                    report_path, config=config, runs=selected, model=model,
+                    source_session=source_session, output_session=session_id)
     primary = models[0]
     # One centre per particle: seg2picks yields a centroid per watershed fragment, so a
     # fragmented prediction of one ribosome gives several picks inside it (see tools/dedupe).
-    merge_report: dict = {"enabled": bool(merge_close_picks)}
+    # The Octopi backend merges close centroids itself (upstream remove_repeated_picks at 0.5 x radius); the
+    # 0.7 x diameter merge below belongs to the legacy seg2picks path only and never runs on Octopi output.
+    legacy = conversion_backend == "legacy_seg2picks"
+    merge_report: dict = {"enabled": bool(merge_close_picks and legacy)}
+    if not legacy:
+        merge_report["note"] = "octopi backend: upstream centroid merge at radius_min_scale x object radius; --merge-close-picks not applied"
     picks_user = user
-    if merge_close_picks and not runner.dry_run:
+    if merge_close_picks and legacy and not runner.dry_run:
         import copick
 
         root = copick.from_file(str(config))
@@ -765,10 +796,11 @@ def easymode(
         picks_user = merge_report["merged_user_id"]
         t = merge_report["totals"]
         print(f"merge_close_picks: {t['n_raw']} raw -> {t['n_merged']} picks ({t['n_removed']} fragment centres merged) at {separation:g} A ({why})", flush=True)
-    elif merge_close_picks:
+    elif merge_close_picks and legacy:
         merge_report["note"] = "dry run: merge planned after seg2picks"
     if runner.dry_run:
-        return {"dry_run": True, "picks_uri": external.seg_uri(primary, picks_user, session_id), "shards": shards, "merge_close_picks": merge_report}
+        return {"dry_run": True, "picks_uri": external.seg_uri(primary, picks_user, session_id), "shards": shards,
+                "merge_close_picks": merge_report, "localization": localization}
     return export_copick_picks(
         config=config, out_dir=out_dir, picks_uri=external.seg_uri(primary, picks_user, session_id), tomo_type=tomo_type,
         voxel_a=voxel_a, layout=layout, runs=runs, session_id=session_id, job_type="copick.easymode",
@@ -782,8 +814,7 @@ def easymode(
                              "manifest": str(Path(out_dir) / shard.SHARD_MANIFEST)},
                 "voxel_size_requested_a": requested_voxel_a, "voxel_size_used_a": voxel_a,
                 "seg2picks_parallelism": seg2picks_accounting,
-                "seg2picks": {"maxima_filter_size": maxima_filter_size, "min_particle_size": min_particle_size,
-                              "max_particle_size": max_particle_size}},
+                "localization": localization},
     )
 
 
@@ -792,7 +823,7 @@ def easymode(
 def boundary(
     *, config: Path, out_dir: Path, session_id: str, in_picks: Path, tomo_type: str, voxel_a: float,
     boundary_voxel_a: float, model: str, ntta: int, runs: list[str] | None, layout: str, gpus: str | None,
-    use_gpu: bool, threads: int | None, runner: external.Runner,
+    use_gpu: bool, threads: int | None, runner: external.Runner, reuse_boundary_session: str = "",
 ) -> dict:
     """octopi tomogram-boundary at ``boundary_voxel_a`` -> ``sample`` mask -> picksin -> STAR."""
     requested_voxel_a = float(voxel_a)
@@ -807,15 +838,26 @@ def boundary(
     if runs is None:
         runs = [r for r, u in picks_uris.items() if u] or None
 
-    if abs(boundary_voxel_a - voxel_a) > 1e-6 and not runner.dry_run:
-        _rescale_tomograms(config, tomo_type, voxel_a, boundary_voxel_a, runs)
-    runner.run(external.octopi_segment_argv(
-        config=str(config), tomo_type=tomo_type, voxel_a=boundary_voxel_a, model=model, seg_name="boundary",
-        seg_user="octopi", seg_session=session_id, runs=runs, ntta=ntta))
-    sample_uri = external.seg_uri("sample", "copick-pipeliner", session_id, boundary_voxel_a)
-    if not runner.dry_run:
-        _isolate_label(config, "boundary", "octopi", session_id, boundary_voxel_a, label=1, out_name="sample",
-                       out_user="copick-pipeliner", runs=runs)
+    boundary_recovery = None
+    if reuse_boundary_session:
+        selected = runs or sorted(read_project_manifest(config).get("runs", {}))
+        if not selected:
+            raise ValueError("No selected runs for boundary reuse")
+        boundary_recovery = validate_boundary_reuse(
+            config=config, out_dir=out_dir, source_session=validate_session(reuse_boundary_session),
+            output_session=session_id, runs=selected, tomo_type=tomo_type, voxel_a=boundary_voxel_a)
+        sample_uri = boundary_recovery["sample_segmentation"]
+        runs = selected
+    else:
+        if abs(boundary_voxel_a - voxel_a) > 1e-6 and not runner.dry_run:
+            _rescale_tomograms(config, tomo_type, voxel_a, boundary_voxel_a, runs)
+        runner.run(external.octopi_segment_argv(
+            config=str(config), tomo_type=tomo_type, voxel_a=boundary_voxel_a, model=model, seg_name="boundary",
+            seg_user="octopi", seg_session=session_id, runs=runs, ntta=ntta))
+        sample_uri = external.seg_uri("sample", "copick-pipeliner", session_id, boundary_voxel_a)
+        if not runner.dry_run:
+            _isolate_label(config, "boundary", "octopi", session_id, boundary_voxel_a, label=1, out_name="sample",
+                           out_user="copick-pipeliner", runs=runs)
     out_uri = external.seg_uri(object_name, "cleaned", session_id)
     runner.run(external.picksin_argv(config=str(config), picks_uri=picks_uri, ref_seg_uri=sample_uri, out_uri=out_uri,
                                      runs=runs, workers=threads))
@@ -827,7 +869,7 @@ def boundary(
         tilt_series_pixel_size_a=upstream.get("tilt_series_pixel_size_a") or _project_tilt_pixel_size(config),
         source={"kind": "copick-picks-filtered", "input_picks_uri": picks_uri, "input_manifest": str(sibling_manifest(in_picks)),
                 "boundary_model": model, "boundary_voxel_size_a": boundary_voxel_a, "sample_segmentation": sample_uri,
-                "voxel_size_requested_a": requested_voxel_a, "voxel_size_used_a": voxel_a},
+                "voxel_size_requested_a": requested_voxel_a, "voxel_size_used_a": voxel_a, "boundary_recovery": boundary_recovery},
     )
     for run, info in manifest["runs"].items():
         n_in = (upstream.get("runs", {}).get(run) or {}).get("n_picks")

@@ -98,7 +98,7 @@ def _gpu_options(func):
 @click.option("--tta", type=int, default=4)
 @click.option("--threshold", type=float, default=0.5)
 @click.option("--batch-size", type=int, default=1)
-@click.option("--maxima-filter-size", type=int, default=9)
+@click.option("--maxima-filter-size", type=int, default=10)
 @click.option("--min-particle-size", type=int, default=1000)
 @click.option("--max-particle-size", type=int, default=50000)
 @click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
@@ -107,7 +107,11 @@ def _gpu_options(func):
 @click.option("--reuse-segmentation-session", default="", help="Completed sibling job's session whose segmentations are converted into this session; no inference.")
 @click.option("--merge-close-picks/--no-merge-close-picks", default=True, help="Merge picks closer than the minimum separation into one centre (default on).")
 @click.option("--min-separation-a", type=float, default=0.0, help="Minimum pick separation in A; 0 = 0.7 x the copick object's diameter.")
-def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, models, tomo_type, voxel_size, tta, threshold, batch_size, maxima_filter_size, min_particle_size, max_particle_size, layout, max_workers, conversion_workers, reuse_segmentation_session, merge_close_picks, min_separation_a):
+@click.option("--conversion-backend", type=click.Choice(["octopi", "legacy_seg2picks"]), default="octopi", help="How segmentations become picks: Octopi's radius-aware localization (default) or copick-utils seg2picks (legacy, with --merge-close-picks).")
+@click.option("--localization-method", type=click.Choice(["watershed", "com"]), default="watershed", help="Octopi backend: watershed or connected-component centre of mass.")
+@click.option("--radius-min-scale", type=float, default=0.5, help="Octopi backend: minimum accepted radius as a fraction of the object radius (also its centroid-merge distance).")
+@click.option("--radius-max-scale", type=float, default=1.0, help="Octopi backend: maximum accepted radius as a fraction of the object radius.")
+def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, models, tomo_type, voxel_size, tta, threshold, batch_size, maxima_filter_size, min_particle_size, max_particle_size, layout, max_workers, conversion_workers, reuse_segmentation_session, merge_close_picks, min_separation_a, conversion_backend, localization_method, radius_min_scale, radius_max_scale):
     """copick-easymode segmentation (one worker per allocated GPU) -> seg2picks -> particles.star."""
     manifest = orchestrate.easymode(
         config=Path(config), out_dir=Path(out_dir), session_id=session_id, models=[m.strip() for m in models.split(",") if m.strip()],
@@ -116,6 +120,7 @@ def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
         layout=layout, gpus=gpus, use_gpu=not no_gpu, threads=threads, runner=Runner(dry_run=dry_run), max_workers=max_workers,
         conversion_workers=conversion_workers, reuse_segmentation_session=reuse_segmentation_session,
         merge_close_picks=merge_close_picks, min_separation_a=min_separation_a,
+        conversion_backend=conversion_backend, localization_method=localization_method, radius_min_scale=radius_min_scale, radius_max_scale=radius_max_scale,
     )
     click.echo(json.dumps(manifest.get("totals", manifest)))
 
@@ -131,12 +136,13 @@ def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
 @click.option("--model", default="tomogram-boundary")
 @click.option("--ntta", type=int, default=4)
 @click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
-def boundary(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, in_picks, tomo_type, voxel_size, boundary_voxel_size, model, ntta, layout):
+@click.option("--reuse-boundary-session", default="")
+def boundary(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, in_picks, tomo_type, voxel_size, boundary_voxel_size, model, ntta, layout, reuse_boundary_session):
     """octopi tomogram-boundary -> sample mask -> picksin -> particles.star."""
     manifest = orchestrate.boundary(
         config=Path(config), out_dir=Path(out_dir), session_id=session_id, in_picks=Path(in_picks), tomo_type=tomo_type,
         voxel_a=voxel_size, boundary_voxel_a=boundary_voxel_size, model=model, ntta=ntta, runs=_runs(runs), layout=layout,
-        gpus=gpus, use_gpu=not no_gpu, threads=threads, runner=Runner(dry_run=dry_run),
+        gpus=gpus, use_gpu=not no_gpu, threads=threads, runner=Runner(dry_run=dry_run), reuse_boundary_session=reuse_boundary_session,
     )
     click.echo(json.dumps(manifest.get("totals", manifest)))
 

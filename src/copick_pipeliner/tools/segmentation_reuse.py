@@ -108,3 +108,42 @@ def validate_reuse(*, config: Path, out_dir: Path, source_session: str, output_s
             "source_inference_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
             "inference_skipped": True, "validation": "completed inference provenance plus matching array metadata; no voxel read",
             "validated_segmentations": artifacts}
+
+
+def validate_boundary_reuse(*,config,out_dir,source_session,output_session,runs,tomo_type,voxel_a):
+    """Reuse only a successful sibling boundary job's matching binary sample masks."""
+    import copick
+    import zarr
+    validate_session(source_session)
+    voxel_a=float(voxel_a)
+    if not source_session or source_session==output_session:raise ValueError('Boundary reuse requires a distinct source session')
+    directory=Path(out_dir).resolve().parent/source_session
+    source_path=directory/'picks_manifest.json'
+    manifest=json.loads(source_path.read_text())
+    uri=f'sample:copick-pipeliner/{source_session}@{voxel_a:g}'
+    config_path=Path(manifest.get('config',''))
+    if not config_path.is_absolute():config_path=directory.parent.parent/config_path
+    if (not (directory/'PIPELINER_JOB_EXIT_SUCCESS').is_file() or manifest.get('job_type')!='copick.boundary'
+            or manifest.get('session_id')!=source_session or config_path.resolve()!=Path(config).resolve()
+            or manifest.get('source',{}).get('sample_segmentation')!=uri
+            or not set(runs).issubset(manifest.get('runs',{}))):
+        raise ValueError('Boundary source job is not complete or does not match config/session/runs/mask identity')
+    root=copick.from_file(str(config));artifacts=[]
+    for name in runs:
+        run=root.get_run(name)
+        segs=run.get_segmentations(name='sample',user_id='copick-pipeliner',session_id=source_session,voxel_size=voxel_a,is_multilabel=False) if run else []
+        spacing=run.get_voxel_spacing(voxel_a) if run else None
+        tomo=spacing.get_tomogram(tomo_type) if spacing else None
+        if len(segs)!=1 or tomo is None:raise ValueError(f'Missing matching source boundary mask or tomogram: {name}')
+        group=zarr.open(segs[0].zarr(),mode='r');array=group['0'];shape=tuple(zarr.open(tomo.zarr(),mode='r')['0'].shape)
+        multiscale=group.attrs['multiscales'][0]
+        axes=[a['name'] if isinstance(a,dict) else a for a in multiscale['axes']]
+        level=next(d for d in multiscale['datasets'] if str(d['path'])=='0')
+        scale=next(t['scale'] for t in level['coordinateTransformations'] if t['type']=='scale')
+        if (tuple(array.shape)!=shape or len(shape)!=3 or min(shape)<1 or axes!=['z','y','x']
+                or len(scale)!=3 or not np.allclose(scale,voxel_a,rtol=0,atol=1e-4) or np.dtype(array.dtype).kind not in 'bui'):
+            raise ValueError(f'Mismatched source boundary metadata: {name}')
+        artifacts.append({'run':name,'shape_zyx':list(shape),'voxel_size_a':voxel_a})
+    return {'source_session':source_session,'output_session':output_session,'sample_segmentation':uri,
+            'source_manifest':str(source_path),'source_manifest_sha256':hashlib.sha256(source_path.read_bytes()).hexdigest(),
+            'inference_skipped':True,'rescale_skipped':True,'validated_masks':artifacts}

@@ -215,3 +215,33 @@ Measured read-only on the live sets: 10522 4632 -> 3087 picks (33 % fragment cen
 fragments. Re-run for an existing project without GPU: a new `pick_easymode` job with
 `reuse_segmentation_session=<old job>` (0.1.10) -> seg2picks -> merge -> export, then the
 downstream chain from `clean_boundary`.
+
+## 0.1.12 (2026-09-23): Octopi localization backend, boundary-mask reuse — the code the Hutchings trials ran
+
+Consolidates the supervisor's isolated snapshot (`OCTOPI-CHANGES.patch` on the 10426 recovery copy of 0.1.8;
+byte-identical source and 82 tests) onto the published 0.1.11, keeping every 0.1.9–0.1.11 addition.
+
+**`copick.easymode` conversion backends** (joboption `conversion_backend`, CLI `--conversion-backend`):
+- `octopi` (default): the installed Octopi's own `octopi.extract.localize.extract_coordinates`, unchanged, run
+  through the configured Octopi interpreter by `tools/octopi_localize_worker.py` (per-run success/empty/error
+  report `octopi-localization-<model>.json`, honest empty pick sets, `validate_report` refuses partial or
+  contradictory output). `localization_method` = `watershed` (default) or `com`; radii come from the copick
+  object's radius × `radius_min_scale`/`radius_max_scale` (defaults 0.5/1.0; ribosome r = 150 Å → volume window
+  1/8…1 sphere, Octopi merges centroids closer than `radius_min_scale × radius` = **75 Å**, 0.5 % border
+  exclusion). Radii are passed in voxels (what upstream's `process_localization` does), output ZYX voxels →
+  XYZ Å exactly once. These are the S084 trial conventions on 10521/10522/10525/10526 (2026-09-23).
+- `legacy_seg2picks`: copick-utils `convert seg2picks` with `min/max_particle_size` voxel counts, followed by the
+  0.1.11 `merge_close_picks` (single linkage at `min_separation_a`, default 0.7 × object diameter = 210 Å). That
+  merge is **confined to this backend**; it never touches Octopi output.
+- Measured on the 10426 ground truth (deposited manual ribosomes, 150 Å match; `picking-diagnostics/octopi_gt_preview.py`):
+  Octopi COM precision 0.86–0.94 / recall 0.18–0.29 with zero crowding; watershed 0.85 / 0.11–0.25 with 3–25 % of
+  picks still within 150 Å of another; seg2picks+210 Å merge 0.83–0.90 / 0.20–0.29. Recall is capped by the
+  segmentation, not the localizer.
+
+**Reuse controls:** `reuse_segmentation_session=<job>` converts a verified completed sibling job's
+segmentations into this job's session without inference (`segmentation_reuse.validate_reuse`);
+`copick.boundary`'s `reuse_boundary_session=<job>` filters new picks against that job's verified sample masks
+(`validate_boundary_reuse`) without rescaling, segmentation or label isolation. Neither ever falls back to
+inference. `conversion_workers`: 0 (default) = automatic bound by the job's memory and volume size (0.1.9),
+N = exactly N, fed to both backends. `maxima_filter_size` is Octopi's watershed `filter_size` (default 10) and
+seg2picks' maxima filter (set 9 to reproduce pre-0.1.12 jobs).

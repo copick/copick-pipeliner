@@ -60,7 +60,7 @@ def recovery(tmp_path, monkeypatch):
 
 def call_kwargs(recovery, runner):
     k = recovery[0]
-    return dict(config=k['config'], out_dir=k['out_dir'], session_id='job007', models=['ribosome'], tomo_type='wbp', voxel_a=8.66, runs=['a','b'], tta=4, threshold=.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000, layout='import_centered', gpus=None, use_gpu=False, threads=64, runner=runner, reuse_segmentation_session='job006')
+    return dict(conversion_backend='legacy_seg2picks',config=k['config'], out_dir=k['out_dir'], session_id='job007', models=['ribosome'], tomo_type='wbp', voxel_a=8.66, runs=['a','b'], tta=4, threshold=.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000, layout='import_centered', gpus=None, use_gpu=False, threads=64, runner=runner, reuse_segmentation_session='job006')
 
 
 def test_typed_options_and_command_forwarding():
