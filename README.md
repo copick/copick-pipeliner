@@ -47,6 +47,23 @@ like any RELION job.
 * **Objects** are registered once by `copick.project`; every later command runs with
   `--no-add-objects`.
 
+## Portal-backed projects (no mirror)
+
+`copick.project` takes a third source, `in_selection`: the `portal_selection.json` written by zarr-particle-tools'
+`zarrparticletools.importtomo`, which fixes for each portal run the tomogram (and so its alignment and voxel
+spacing) the tilt geometry was imported for. The job writes a copick `cryoet_data_portal` config for the selection's
+datasets with a writable overlay in its own directory; runs are named by portal run ID (the `rlnTomoName` of the
+import) and every tomogram streams from the portal, so nothing is imported, linked or copied. The project manifest
+records, per run, the selected portal tomogram and the copick type it is read under (for 10426:
+`wbp-filtered-ctfdeconv`); a type that names several tomograms of a run, or differs between runs, is refused.
+Downstream jobs read that type when their `tomo_type` is empty.
+
+`copick.portalpicks` on such a project reads the deposited annotations from the portal API: the candidates for a run
+are the annotation files on its selected alignment and voxel spacing, narrowed by object (name or GO ID),
+deposition, shape, method type and ground-truth status, or pinned by `annotation_file_ids`. Zero or several
+candidates for a run fail with the candidates listed. The picks manifest pins the chosen file IDs and records
+whether the orientations were measured.
+
 ## Localization and reuse (0.1.12)
 
 `copick.easymode` defaults to `conversion_backend=octopi`, using the installed

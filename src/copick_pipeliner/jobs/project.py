@@ -1,12 +1,15 @@
 """``copick.project``: a copick project for one ApexAgent/RELION project.
 
-Two entry points, an alternation (``required_if (sibling == "")``, the one shape
-ApexAgent's ``planning.registry._requiredness`` models):
+Three entry points, an alternation (each required unless one of the others is given):
 
 * ``in_tomograms`` -- a RELION ``tomograms.star`` (``TomogramGroupMetadata``), imported
   with copick's ``add tomograms-relion`` (run names = ``rlnTomoName``);
 * ``dataset_dir`` -- a cryoET Data Portal dataset (or run) mirror, whose
-  ``Reconstructions/VoxelSpacing*/Tomograms/<id>/<run>.zarr`` are imported per run.
+  ``Reconstructions/VoxelSpacing*/Tomograms/<id>/<run>.zarr`` are imported per run;
+* ``in_selection`` -- a resolved ``portal_selection.json`` (zarr-particle-tools'
+  ``zarrparticletools.importtomo``): a portal-backed project (copick ``cryoet_data_portal``
+  config) whose runs are the selection's, each read from its selected portal tomogram;
+  nothing is imported or linked.
 
 The job writes ``copick_config.json`` (``ParamsData``) with ``overlay_root`` inside its
 own directory, registers the pickable objects once (later jobs run with
@@ -50,7 +53,7 @@ class CopickProjectJob(CopickJobBase):
                 "copick run. Leave empty to import a portal dataset directory instead."
             ),
             is_required=False,
-            required_if=JobOptionCondition([("dataset_dir", "=", "")]),
+            required_if=JobOptionCondition([("dataset_dir", "=", ""), ("in_selection", "=", "")], operation="ALL"),
         )
         self.joboptions["dataset_dir"] = DirPathJobOption(
             label="Portal dataset directory:",
@@ -63,7 +66,19 @@ class CopickProjectJob(CopickJobBase):
             must_be_in_project=False,
             must_exist=True,
             is_required=False,
-            required_if=JobOptionCondition([("in_tomograms", "=", "")]),
+            required_if=JobOptionCondition([("in_tomograms", "=", ""), ("in_selection", "=", "")], operation="ALL"),
+        )
+        self.joboptions["in_selection"] = InputNodeJobOption(
+            label="Resolved portal selection:",
+            node_type=NODE_PROCESSDATA,
+            pattern=FileDescription("portal_selection.json", [".json"]),
+            default_value="",
+            help_text=(
+                "A portal_selection.json from zarrparticletools.importtomo: the project streams each run's selected "
+                "portal tomogram, and the picks are made in the frame the tilt geometry was imported for."
+            ),
+            is_required=False,
+            required_if=JobOptionCondition([("in_tomograms", "=", ""), ("dataset_dir", "=", "")], operation="ALL"),
         )
         self.joboptions["tomogram_id"] = StringJobOption(
             label="Portal tomogram id (empty = visualization default):",
@@ -99,6 +114,9 @@ class CopickProjectJob(CopickJobBase):
         args = self.common_args()
         tomograms_star = jo["in_tomograms"].get_string().strip()
         dataset_dir = jo["dataset_dir"].get_string().strip()
+        selection = jo["in_selection"].get_string().strip()
+        if selection:
+            args += ["--selection", selection]
         if tomograms_star:
             args += ["--tomograms-star", tomograms_star, "--base-dir", "."]
         if dataset_dir:

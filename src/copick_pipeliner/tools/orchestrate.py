@@ -17,7 +17,7 @@ import numpy as np
 from . import dedupe, external, octopi_localization, portal_annotations as portal, shard
 from .segmentation_reuse import validate_boundary_reuse, validate_reuse, validate_session
 from .. import settings
-from .export_star import PICKS_MANIFEST, export_copick_picks, export_portal_picks
+from .export_star import PICKS_MANIFEST, export_copick_picks, export_portal_picks, export_selection_picks
 from .export_star import map_runs as export_map_runs
 from .manifest import new_manifest, read_manifest, sibling_manifest, write_manifest
 
@@ -69,6 +69,70 @@ def write_copick_config(path: Path, *, name: str, overlay_root: Path, objects: l
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config, indent=1) + "\n")
     return path
+
+
+def write_copick_portal_config(
+    path: Path, *, name: str, overlay_root: Path, objects: list[dict], dataset_ids: list[int], description: str = ""
+) -> Path:
+    """A copick ``cryoet_data_portal`` config: runs and tomograms stream from the portal, writes go to the overlay.
+
+    Runs are named by portal run id. The pickable objects are this chain's (inference writes them); deposited
+    annotations are read from the portal API by ``portal_picks``, not through copick's portal picks.
+    """
+    config = {
+        "name": name,
+        "description": description or f"copick-pipeliner portal project {name} (datasets {dataset_ids})",
+        "version": "1.0.0",
+        "pickable_objects": [{k: v for k, v in o.items() if v is not None} for o in objects],
+        "overlay_root": f"local://{Path(overlay_root).resolve()}",
+        "overlay_fs_args": {"auto_mkdir": True},
+        "config_type": "cryoet_data_portal",
+        "dataset_ids": [int(d) for d in dataset_ids],
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, indent=1) + "\n")
+    return path
+
+
+def portal_tomogram_types(config_path: Path, records: dict[str, dict]) -> dict[str, str]:
+    """``run -> copick tomo_type`` of each run's selected portal tomogram, found by portal tomogram id.
+
+    copick names a portal tomogram by its reconstruction/processing metadata, so two tomograms of one voxel spacing
+    can share a name; a name that does not identify the selected tomogram is refused rather than read.
+    """
+    import copick  # lazily: the tools environment
+
+    root = copick.from_file(str(config_path))
+    out: dict[str, str] = {}
+    for name, record in records.items():
+        run = root.get_run(name)
+        if run is None:
+            raise LookupError(f"run {name} is not in the portal project (datasets {record.get('dataset_id')})")
+        vs = run.get_voxel_spacing(float(record["voxel_spacing"]))
+        tomograms = list(vs.tomograms) if vs is not None else []
+        mine = [t for t in tomograms if getattr(t.meta, "portal_tomo_id", None) == int(record["tomogram_id"])]
+        if len(mine) != 1:
+            raise LookupError(f"run {name}: selected tomogram {record['tomogram_id']} not found at {record['voxel_spacing']} A")
+        tomo_type = mine[0].tomo_type
+        same_name = [getattr(t.meta, "portal_tomo_id", None) for t in tomograms if t.tomo_type == tomo_type]
+        if len(same_name) > 1:
+            raise LookupError(
+                f"run {name}: copick type {tomo_type!r} names several portal tomograms {same_name}; "
+                "reading it could return another volume"
+            )
+        out[name] = tomo_type
+    return out
+
+
+def project_tomo_type(config_path: Path, tomo_type: str | None) -> str:
+    """The tomogram type a job reads: the given one, else the one the project job recorded (portal projects)."""
+    if tomo_type:
+        return tomo_type
+    recorded = read_project_manifest(config_path).get("tomo_type")
+    if not recorded:
+        raise ValueError(f"no --tomo-type given and the project beside {config_path} records none")
+    return recorded
 
 
 def read_project_manifest(config_path: Path) -> dict:
@@ -196,8 +260,12 @@ def project(
     *, out_dir: Path, session_id: str, tomo_type: str, voxel_a: float | None, runs: list[str] | None,
     objects: str, dataset_dir: Path | None, tomograms_star: Path | None, base_dir: Path | None,
     tomogram_id: str | None, overlay_root: Path | None, runner: external.Runner, link_volumes: bool = True,
+    selection: Path | None = None,
 ) -> dict:
-    """Write the config and import the tomograms (portal mirror or tomograms.star).
+    """Write the config and import the tomograms (portal selection, portal mirror or tomograms.star).
+
+    ``selection`` (a resolved ``portal_selection.json``): a portal-backed project over the selection's datasets whose
+    tomograms stream from the portal; nothing is imported or linked (see :func:`_project_from_selection`).
 
     ``link_volumes`` (default): a volume that is already an OME-zarr copick can read in place
     is **referenced** from the copick overlay by a symlink (no pyramid regenerated, nothing
@@ -208,6 +276,11 @@ def project(
     out_dir.mkdir(parents=True, exist_ok=True)
     overlay = Path(overlay_root) if overlay_root else out_dir / "overlay"
     overlay.mkdir(parents=True, exist_ok=True)
+    if selection is not None:
+        return _project_from_selection(
+            out_dir=out_dir, overlay=overlay, session_id=session_id, objects=objects, selection=Path(selection),
+            runs=runs, runner=runner,
+        )
     config_path = write_copick_config(out_dir / CONFIG_NAME, name=out_dir.name, overlay_root=overlay, objects=parse_objects(objects))
     manifest = new_manifest("project", job_type="copick.project", session_id=session_id, user_id=None, config=str(config_path))
     manifest["overlay_root"] = str(overlay)
@@ -349,6 +422,61 @@ def project(
         raise ValueError("either dataset_dir or tomograms_star is required")
 
     manifest["tilt_series_pixel_size_a"] = _consistent(r.get("tilt_series_pixel_size_a") for r in manifest["runs"].values())
+    manifest["totals"] = {"n_runs": len(manifest["runs"])}
+    write_manifest(out_dir / PROJECT_MANIFEST, manifest)
+    return manifest
+
+
+def _project_from_selection(
+    *, out_dir: Path, overlay: Path, session_id: str, objects: str, selection: Path, runs: list[str] | None,
+    runner: external.Runner,
+) -> dict:
+    """A portal-backed project for a resolved selection: config + manifest, no tomogram imported.
+
+    Each run's pinned tomogram (portal id) is recorded with its geometry and the copick type it is read under; every
+    downstream job reads that type (``project_tomo_type``) at the selection's voxel spacing.
+    """
+    from . import portal_selection as selection_io
+
+    sel = selection_io.read_selection(selection)
+    records = selection_io.run_records(sel)
+    if runs:
+        unknown = sorted(set(runs) - set(records))
+        if unknown:
+            raise LookupError(f"runs {unknown} are not in the selection {sorted(records)}")
+        records = {name: records[name] for name in runs}
+    config_path = write_copick_portal_config(
+        out_dir / CONFIG_NAME, name=out_dir.name, overlay_root=overlay, objects=parse_objects(objects),
+        dataset_ids=selection_io.dataset_ids(sel),
+    )
+    manifest = new_manifest("project", job_type="copick.project", session_id=session_id, user_id=None, config=str(config_path))
+    manifest["overlay_root"] = str(overlay)
+    manifest["objects"] = parse_objects(objects)
+    manifest["source"] = {"kind": "portal-selection", "selection": str(selection), "dataset_ids": selection_io.dataset_ids(sel)}
+    manifest["annotation_source"] = {"kind": "portal-api", "selection": str(selection)}
+    types = {} if runner.dry_run else portal_tomogram_types(config_path, records)
+    for name, record in records.items():
+        manifest["runs"][name] = {
+            "tomogram": {
+                "tomogram_id": record["tomogram_id"],
+                "alignment_id": record["alignment_id"],
+                "voxel_spacing_id": record["voxel_spacing_id"],
+                "uri": record["tomogram_uri"],
+                **selection_io.geometry(record).as_dict(),
+            },
+            "copick_tomo_type": types.get(name),
+            "imported_how": "referenced (portal)",
+            "tilt_series_pixel_size_a": float(record["tiltseries_pixel_size"]),
+        }
+    distinct = set(types.values())
+    if len(distinct) > 1:
+        raise ValueError(
+            f"the selected tomograms are read under different copick types {sorted(distinct)}; "
+            "downstream jobs read one type: select tomograms of one kind"
+        )
+    manifest["tomo_type"] = distinct.pop() if distinct else None
+    manifest["voxel_size_a"] = _consistent(float(r["voxel_spacing"]) for r in records.values())
+    manifest["tilt_series_pixel_size_a"] = _consistent(r["tilt_series_pixel_size_a"] for r in manifest["runs"].values())
     manifest["totals"] = {"n_runs": len(manifest["runs"])}
     write_manifest(out_dir / PROJECT_MANIFEST, manifest)
     return manifest
@@ -619,7 +747,8 @@ def portal_picks(
     *, config: Path | None, out_dir: Path, session_id: str, object_name: str, deposition_id: str | None,
     shape: str, layout: str, runs: list[str] | None, user_id: str, import_into_copick: bool,
     dataset_dir: Path | None = None, tomogram_id: str | None = None, copick_object: str | None = None,
-    run_prefix: str = "",
+    run_prefix: str = "", method_type: str | None = None, ground_truth: bool | None = None,
+    annotation_file_ids: list[int] | None = None,
 ) -> dict:
     """The deterministic fallback: deposited portal picks -> copick (optional) -> STAR.
 
@@ -637,6 +766,14 @@ def portal_picks(
             pm = read_project_manifest(config)
         except FileNotFoundError:
             pm = None
+    if dataset_dir is None and pm is not None and (pm.get("source") or {}).get("kind") == "portal-selection":
+        root = _open_for_storage(config) if import_into_copick else None
+        return export_selection_picks(
+            selection_path=Path(pm["source"]["selection"]), out_dir=out_dir, object_name=object_name,
+            deposition_id=deposition_id, shape=shape, layout=layout, runs=runs or list(pm["runs"]),
+            session_id=session_id, user_id=user_id, config=config, method_type=method_type, ground_truth=ground_truth,
+            annotation_file_ids=annotation_file_ids, copick_root=root, copick_object=copick_object,
+        )
     if pm is not None and pm.get("runs"):
         project_runs = list(pm["runs"])
     if dataset_dir is None:
@@ -658,21 +795,23 @@ def portal_picks(
     if selected is not None:
         portal_runs = [portal.run_name(p) for p in portal.dataset_runs(Path(dataset_dir))]
         run_map = export_map_runs(selected, portal_runs, prefix=run_prefix)
-    root = None
-    if import_into_copick:
-        if config is None:
-            raise ValueError("--import-into-copick needs --config")
-        try:
-            import copick  # lazy
-        except ImportError as exc:
-            raise RuntimeError("copick is not importable in this environment; storage was requested (--import-into-copick) "
-                               "and cannot be honoured; pass --no-import-into-copick to export the STAR only") from exc
-        root = copick.from_file(str(config))
+    root = _open_for_storage(config) if import_into_copick else None
     return export_portal_picks(
         dataset_dir=dataset_dir, out_dir=out_dir, object_name=object_name, deposition_id=deposition_id,
         shape=shape, layout=layout, runs=selected, session_id=session_id, user_id=user_id, config=config,
         tomogram_id=tomogram_id, copick_root=root, copick_object=copick_object, run_map=run_map,
     )
+
+
+def _open_for_storage(config: Path | None):
+    if config is None:
+        raise ValueError("--import-into-copick needs --config")
+    try:
+        import copick  # lazy
+    except ImportError as exc:
+        raise RuntimeError("copick is not importable in this environment; storage was requested (--import-into-copick) "
+                           "and cannot be honoured; pass --no-import-into-copick to export the STAR only") from exc
+    return copick.from_file(str(config))
 
 
 # ---- copick.easymode ------------------------------------------------------------------
