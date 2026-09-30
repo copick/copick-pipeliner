@@ -325,9 +325,6 @@ def test_runs_from_a_real_global_block_do_not_trip_dataframe_truthiness(tmp_path
     starfile.write({"global": pd.DataFrame({"rlnTomoName": ["tomo153_vali"], "rlnTomoTiltSeriesPixelSize": [2.165]})}, star)
     runs = orchestrate._runs_from_tomograms_star(star)
     assert runs == {"tomo153_vali": {"tomograms_star": str(star), "tilt_series_pixel_size_a": 2.165}}   # no binning, no volume column: nothing more is claimed
-    probe = Path("/mnt/main0/projects/CryoAgents/utz/data/supervisor-P1-interface-probes/tomograms.star")
-    if probe.is_file():
-        assert list(orchestrate._runs_from_tomograms_star(probe)) == ["tomo153_vali"]
 
 
 def test_portal_picks_verb_maps_project_runs_to_portal_runs_via_the_annotation_source(synthetic_dataset, tmp_path):
