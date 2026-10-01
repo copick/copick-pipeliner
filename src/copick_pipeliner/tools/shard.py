@@ -45,6 +45,8 @@ from typing import Callable, Iterable, Sequence
 
 SHARD_DIR = "easymode_shards"
 SHARD_MANIFEST = "easymode_shards.json"
+#: What the job's one fetch resolved, model by model (easymode_worker --fetch --record).
+MODELS_RECORD = "easymode_models.json"
 ENV_VISIBLE = "CUDA_VISIBLE_DEVICES"
 THREAD_VARS = ("OMP_NUM_THREADS", "TF_NUM_INTRAOP_THREADS", "TF_NUM_INTEROP_THREADS")
 
@@ -296,15 +298,46 @@ def bootstrap_available(interpreter: Path, probe=subprocess.run) -> tuple[bool, 
     return True, str(interpreter)
 
 
-def bootstrap_argv(copick_argv: list[str], *, lock: str | None = None, interpreter: Path | None = None, entry: str | None = None) -> list[str]:
-    """``<interpreter> -m copick_pipeliner.tools.easymode_worker [--lock L] -- <copick args>``."""
+def bootstrap_argv(copick_argv: list[str], *, lock: str | None = None, interpreter: Path | None = None, entry: str | None = None,
+                   offline: bool = False) -> list[str]:
+    """``<interpreter> -m copick_pipeliner.tools.easymode_worker [--lock L] [--offline] -- <copick args>``."""
     interp = interpreter or copick_interpreter(copick_argv[0])
     argv = [str(interp), "-m", BOOTSTRAP_MODULE]
     if lock:
         argv += ["--lock", str(lock)]
     if entry:
         argv += ["--entry", entry]
+    if offline:
+        argv.append("--offline")
     return argv + ["--", *copick_argv[1:]]
+
+
+def fetch_argv(features: Sequence[str], *, record: Path, interpreter: Path, lock: str | None = None) -> list[str]:
+    """``<interpreter> -m copick_pipeliner.tools.easymode_worker [--lock L] --fetch a,b --record R``."""
+    argv = [str(interpreter), "-m", BOOTSTRAP_MODULE]
+    if lock:
+        argv += ["--lock", str(lock)]
+    return argv + ["--fetch", ",".join(features), "--record", str(record)]
+
+
+def fetch_models(features: Sequence[str], *, out_dir: Path, interpreter: Path, env: dict, lock: str | None = None,
+                 run=subprocess.run, sink=None) -> dict:
+    """Resolve the job's easymode models once, before any worker starts (downloading into the
+    deployment's model directory if needed), so the workers can run offline. Raises ``ShardError``
+    naming what is missing, before any GPU time is spent."""
+    sink = sys.stdout if sink is None else sink
+    record = Path(out_dir) / MODELS_RECORD
+    argv = fetch_argv(features, record=record, interpreter=interpreter, lock=lock)
+    sink.write(f"easymode models: resolving {', '.join(features)} once before inference\n"); sink.flush()
+    done = run(argv, env=env, capture_output=True, text=True)
+    for line in (done.stdout or "").splitlines() + (done.stderr or "").splitlines():
+        sink.write(f"[fetch] {line}\n")
+    sink.flush()
+    resolved = json.loads(record.read_text()) if record.is_file() else None
+    if done.returncode != 0 or resolved is None:
+        last = ((done.stderr or "").strip().splitlines() or ["no output"])[-1]
+        raise ShardError(f"easymode model(s) could not be resolved before inference (exit {done.returncode}): {last}")
+    return resolved
 
 
 # ---- orchestration entry ----------------------------------------------------------------
@@ -314,9 +347,14 @@ def run_easymode_sharded(
     argv_for: Callable[[list[str]], list[str]], gpus: str | None, use_gpu: bool, threads: int | None, max_workers: int | None,
     dry_run: bool, env: dict | None = None, spawn=subprocess.Popen, lookup: Callable[..., set[str]] = complete_runs,
     probe: Callable[[], list[str]] = nvidia_smi_devices, sink=None, lock_path: str | None = None, bootstrap: str = "auto",
+    features: Sequence[str] | None = None, fetch=fetch_models,
 ) -> dict:
     """Plan, run and verify; returns the shard manifest (also written to ``out_dir``). Raises
-    ``ShardError`` on any worker failure or missing segmentation, before anything downstream."""
+    ``ShardError`` on any worker failure or missing segmentation, before anything downstream.
+
+    ``models`` are the copick names the segmentations are stored and looked up under;
+    ``features`` the easymode names they come from (default: the same). With the bootstrap, the
+    features are fetched once before the workers start and the workers run easymode offline."""
     env = dict(os.environ if env is None else env)
     out_dir = Path(out_dir)
     sink = sys.stdout if sink is None else sink
@@ -354,9 +392,11 @@ def run_easymode_sharded(
             bootstrap_note = f"locked easymode import via {why}"
     for w in workers:
         plain = argv_for(w.runs)
-        w.argv = bootstrap_argv(plain, lock=lock_path, interpreter=interpreter) if interpreter is not None else plain
+        w.argv = bootstrap_argv(plain, lock=lock_path, interpreter=interpreter, offline=True) if interpreter is not None else plain
+    features = list(features or models)
     manifest = {
         "tool": "copick-pipeliner easymode sharding", "session_id": session_id, "user_id": user_id, "models": list(models),
+        "features": features,
         "voxel_size_a": voxel_a, "requested_runs": requested, "skipped_existing": sorted(done_before), "use_gpu": use_gpu,
         "allocation_visible_devices": env.get(ENV_VISIBLE), "devices": devices, "n_workers": len(workers), "bootstrap": bootstrap_note,
         "threads_per_worker": n_threads, "workers": [asdict(w) for w in workers], "dry_run": dry_run, "status": "planned",
@@ -367,6 +407,8 @@ def run_easymode_sharded(
         manifest["status"] = "dry run" if dry_run else "nothing to do"
         _write(out_dir / SHARD_MANIFEST, manifest)
         return manifest
+    if interpreter is not None:
+        manifest["models_fetch"] = fetch(features, out_dir=out_dir, interpreter=interpreter, env=env, lock=lock_path, sink=sink)
     manifest["status"] = "running"
     manifest["started_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     _write(out_dir / SHARD_MANIFEST, manifest)          # visible while inference runs

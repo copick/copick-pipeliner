@@ -71,7 +71,8 @@ def _fake_easymode(root: Path) -> Path:
         def main():
             import easymode.core.config as cfg, easymode.core.distribution as d
             assert isinstance(cfg.settings, dict), cfg.settings
-            print(f"ENTRY_OK device={os.environ.get('CUDA_VISIBLE_DEVICES')} model_dir={d.MODEL_CACHE_DIR} args={' '.join(sys.argv[1:])}", flush=True)
+            print(f"ENTRY_OK device={os.environ.get('CUDA_VISIBLE_DEVICES')} model_dir={d.MODEL_CACHE_DIR} args={' '.join(sys.argv[1:])}"
+                  f" online={getattr(d, '_online', 'n/a')}", flush=True)
             return 0
     '''))
     return root
@@ -131,6 +132,108 @@ def test_bootstrap_fails_loudly_when_settings_never_load(tmp_path, monkeypatch):
     done = subprocess.run([sys.executable, "-m", WORKER, "--lock", str(tmp_path / "l"), "--entry", "fake_copick_cli:main", "--", "x"],
                           env=env, capture_output=True, text=True, timeout=120)
     assert done.returncode != 0 and "never became a mapping" in done.stderr and "ENTRY_OK" not in done.stdout
+
+
+def _fake_store(fake: Path) -> None:
+    """distribution.py in easymode 1.2.5's shape: MODEL_CACHE_DIR and REGISTRY_CACHE read from config at
+    import, a cached ``_online`` flag, and get_model rewriting registry.json and downloading into the
+    directory only when online. FAKE_EASYMODE_REMOTE lists the features upstream has."""
+    (fake / "easymode/core/distribution.py").write_text(textwrap.dedent('''
+        import json, os
+        import easymode.core.config as cfg
+        MODEL_CACHE_DIR = cfg.settings["MODEL_DIRECTORY"]
+        REGISTRY_CACHE = os.path.join(MODEL_CACHE_DIR, "registry.json")
+        _online = None
+
+        def is_online():
+            global _online
+            if _online is None:
+                _online = os.environ.get("FAKE_EASYMODE_ONLINE", "1") == "1"
+            return _online
+
+        def get_model(feature):
+            weights = os.path.join(MODEL_CACHE_DIR, "models", feature + "_v1.h5")
+            if is_online():
+                with open(REGISTRY_CACHE, "w") as f:
+                    json.dump({}, f)
+                if feature in os.environ.get("FAKE_EASYMODE_REMOTE", "").split(",") and not os.path.exists(weights):
+                    os.makedirs(os.path.dirname(weights), exist_ok=True)
+                    with open(weights, "wb") as f:
+                        f.write(b"w" * 1000)
+                    with open(weights[:-3] + ".json", "w") as f:
+                        json.dump({"feature": feature, "tag": "v1", "timestamp": "20260930"}, f)
+                    with open(os.environ["FAKE_EASYMODE_DOWNLOADS"], "a") as log:
+                        log.write(feature + "\\n")
+            if not os.path.exists(weights):
+                return None, None
+            with open(weights[:-3] + ".json") as f:
+                return weights, json.load(f)
+    '''))
+
+
+def _worker(fake: Path, tmp_path: Path, *args: str, **env_extra: str) -> subprocess.CompletedProcess:
+    env = dict(os.environ, PYTHONPATH=str(fake) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+               FAKE_EASYMODE_SETTINGS=str(tmp_path / "home/easymode/settings.txt"), FAKE_EASYMODE_WRITE_SLEEP="0",
+               FAKE_EASYMODE_DOWNLOADS=str(tmp_path / "downloads.txt"), **env_extra)
+    return subprocess.run([sys.executable, "-m", WORKER, "--lock", str(tmp_path / "lock"), *args],
+                          env=env, capture_output=True, text=True, timeout=120, check=False)
+
+
+def test_the_deployment_model_directory_replaces_the_users_setting_in_memory_only(tmp_path):
+    fake = _fake_easymode(tmp_path / "fake"); _fake_store(fake)
+    models = tmp_path / "shared/easymode"
+    done = _worker(fake, tmp_path, "--entry", "fake_copick_cli:main", "--", "inference",
+                   COPICK_PIPELINER_EASYMODE_MODELS=str(models))
+    assert done.returncode == 0, done.stderr
+    assert f"model_dir={models} " in done.stdout and models.is_dir()
+    assert f"MODEL_DIRECTORY={models} from $COPICK_PIPELINER_EASYMODE_MODELS" in done.stderr
+    # The user's own settings file still names their directory: nothing was written there for this job.
+    assert json.loads((tmp_path / "home/easymode/settings.txt").read_text())["MODEL_DIRECTORY"] == "/tmp/fake-easymode-models"
+
+
+def test_one_fetch_downloads_a_model_once_and_records_it_and_the_workers_stay_offline(tmp_path):
+    fake = _fake_easymode(tmp_path / "fake"); _fake_store(fake)
+    models, record = tmp_path / "shared/easymode", tmp_path / "AutoPick/job007/easymode_models.json"
+    env = {"COPICK_PIPELINER_EASYMODE_MODELS": str(models), "FAKE_EASYMODE_REMOTE": "atp_synthase"}
+    for _ in range(2):                                     # two jobs: the second finds what the first fetched
+        done = _worker(fake, tmp_path, "--fetch", "atp_synthase", "--record", str(record), **env)
+        assert done.returncode == 0, done.stderr
+    assert (tmp_path / "downloads.txt").read_text().split() == ["atp_synthase"]
+    resolved = json.loads(record.read_text())
+    assert resolved["model_directory"] == str(models) and resolved["writable"] and resolved["missing"] == {}
+    assert [(m["feature"], m["tag"], m["timestamp"], m["bytes"]) for m in resolved["models"]] == [("atp_synthase", "v1", "20260930", 1000)]
+    worker = _worker(fake, tmp_path, "--offline", "--entry", "fake_copick_cli:main", "--", "inference", **env)
+    assert worker.returncode == 0 and "online=False" in worker.stdout, worker.stderr
+
+
+def test_a_model_that_cannot_be_fetched_fails_naming_it_and_the_directory(tmp_path):
+    fake = _fake_easymode(tmp_path / "fake"); _fake_store(fake)
+    models, record = tmp_path / "shared/easymode", tmp_path / "job/easymode_models.json"
+    done = _worker(fake, tmp_path, "--fetch", "proteasome", "--record", str(record),
+                   COPICK_PIPELINER_EASYMODE_MODELS=str(models), FAKE_EASYMODE_ONLINE="0")
+    assert done.returncode == 1
+    assert f"not available in {models} (online: False, writable by this user: True): proteasome" in done.stderr
+    assert json.loads(record.read_text())["missing"] == {"proteasome": "easymode returned no weights file"}
+
+
+def test_a_directory_this_user_cannot_write_is_only_read(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root can write any directory")
+    fake = _fake_easymode(tmp_path / "fake"); _fake_store(fake)
+    models, record = tmp_path / "shared/easymode", tmp_path / "job/easymode_models.json"
+    env = {"COPICK_PIPELINER_EASYMODE_MODELS": str(models), "FAKE_EASYMODE_REMOTE": "ribosome"}
+    assert _worker(fake, tmp_path, "--fetch", "ribosome", "--record", str(record), **env).returncode == 0
+    frozen = [models, models / "models", models / "registry.json"]
+    for path in frozen:                                    # another user's directory, say
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    try:
+        done = _worker(fake, tmp_path, "--fetch", "ribosome", "--record", str(record), **env)
+    finally:
+        for path in frozen:
+            path.chmod(0o755 if path.is_dir() else 0o644)
+    assert done.returncode == 0, done.stderr               # online, easymode would have rewritten registry.json and failed
+    resolved = json.loads(record.read_text())
+    assert not resolved["writable"] and resolved["online"] is False and [m["feature"] for m in resolved["models"]] == ["ribosome"]
 
 
 SRC = str(Path(shard.__file__).parents[2])      # the frozen-source bind the deployment puts on PYTHONPATH
