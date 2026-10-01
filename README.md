@@ -91,6 +91,24 @@ TensorFlow and torch environments can therefore share the same job plugin withou
 combining the frameworks. Octopi is a separate runtime dependency; installing this
 package alone does not install the ML tools or their weights.
 
+## easymode weights (0.1.14)
+
+easymode keeps its weights in one directory, `MODEL_DIRECTORY` in `~/easymode/settings.txt` (default
+`~/easymode`), with no environment override. Set `COPICK_PIPELINER_EASYMODE_MODELS` to a directory every job can
+read, and the job uses it instead, in memory: the settings file is left as it is. Shared by a deployment, each model
+is downloaded once rather than per user, image or job.
+
+A `copick.easymode` job resolves its models once before inference, under a lock in that directory: easymode
+downloads what is missing or outdated when it is online and the directory is writable by the job's user; otherwise
+the job only finds what is there, and fails naming any model that is not. `easymode_models.json` in the job
+directory records each model's version tag, timestamp, path and size. The GPU workers then run easymode offline,
+so they neither reach the network nor write into the shared directory. Make a directory shared between users
+group-writable (`chmod g+ws`); jobs write into it with umask 002.
+
+Every easymode feature can be run, including the 2D-engine (`.scnm`) models, with copick-easymode >= 0.3.0. A
+feature name with underscores is stored in copick with dashes (`atp_synthase` is the object `atp-synthase`), which
+is the object the copick configuration must define, as a particle with a radius, for the Octopi backend.
+
 For a new conversion of existing segmentations, set
 `reuse_segmentation_session=<prior job session>` on a fresh `copick.easymode` job.
 The old sibling job's completed inference manifest, requested runs/models/settings,

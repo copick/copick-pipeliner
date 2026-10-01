@@ -44,6 +44,15 @@ def run_names_args(runs: list[str] | None, flag: str = "--run-names") -> list[st
     return out
 
 
+def copick_object_name(feature: str) -> str:
+    """An easymode feature's name in a copick project: copick stores names sanitized (``_`` becomes
+    ``-``) and refuses underscores in object names, so ``atp_synthase`` is ``atp-synthase``.
+    copick-easymode writes its segmentations under the same name."""
+    from copick.util.escape import sanitize_name  # lazy: copick is the `copick` extra
+
+    return sanitize_name(feature, suppress_warnings=True)
+
+
 def seg_uri(name: str, user_id: str, session_id: str, voxel_a: float | None = None) -> str:
     uri = f"{name}:{user_id}/{session_id}"
     return f"{uri}@{voxel_a:g}" if voxel_a is not None else uri

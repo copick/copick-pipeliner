@@ -339,3 +339,45 @@ def test_tomogram_voxels_reads_only_the_array_metadata(tmp_path):
     assert orchestrate.tomogram_voxels(config, "wbp", 10.0) == 4 * 6 * 8
     assert orchestrate.tomogram_voxels(config, "wbp", 12.0) is None
     assert orchestrate.tomogram_voxels(config, "denoised", 10.0) is None
+
+
+def test_models_are_fetched_once_by_easymode_name_and_the_workers_run_offline(tmp_path, monkeypatch):
+    """The copick names (``atp-synthase``) are what segmentations are looked up under; the easymode names
+    (``atp_synthase``) are fetched, once, before any worker starts; every worker then runs offline."""
+    import subprocess
+    import sys
+
+    venv = tmp_path / "venv/bin"; venv.mkdir(parents=True); (venv / "python").symlink_to(sys.executable)
+    (venv / "copick").write_text(f"#!{venv / 'python'}\n"); (venv / "copick").chmod(0o755)
+    monkeypatch.setattr(shard, "bootstrap_available", lambda interpreter: (True, str(interpreter)))
+    fetched, spawned, looked_up = [], [], []
+
+    def fetch(features, *, out_dir, interpreter, env, lock, sink):
+        fetched.append((list(features), interpreter, bool(spawned)))
+        return {"models": [{"feature": "atp_synthase", "tag": "sv2-3d"}], "missing": {}}
+
+    def spawn(argv, **kw):
+        spawned.append(argv)
+        return subprocess.Popen([sys.executable, "-c", "pass"], **kw)
+
+    def lookup(config, runs, models, **kw):
+        looked_up.append(list(models))
+        return set() if len(looked_up) == 1 else set(runs)
+
+    manifest = shard.run_easymode_sharded(
+        out_dir=tmp_path / "AutoPick/job007", config=tmp_path / "unused.json", runs=["run_a", "run_b"], models=["atp-synthase"],
+        features=["atp_synthase"], user_id="easymode", session_id="job007", voxel_a=10.0,
+        argv_for=lambda rs: [str(venv / "copick"), "inference", "easymode", "-m", "atp_synthase", "-r", ",".join(rs)],
+        gpus=None, use_gpu=True, threads=None, max_workers=None, dry_run=False, env={"CUDA_VISIBLE_DEVICES": "0,1", "PATH": os.environ["PATH"]},
+        lookup=lookup, probe=list, spawn=spawn, fetch=fetch)
+    assert fetched == [(["atp_synthase"], venv / "python", False)]          # once, before the first worker
+    assert looked_up == [["atp-synthase"], ["atp-synthase"]]
+    assert len(spawned) == 2 and all("--offline" in argv[: argv.index("--")] for argv in spawned)
+    assert manifest["status"] == "complete" and manifest["features"] == ["atp_synthase"]
+    assert manifest["models_fetch"]["models"][0]["tag"] == "sv2-3d"
+
+
+def test_an_easymode_feature_is_named_the_way_copick_stores_it():
+    assert external.copick_object_name("atp_synthase") == "atp-synthase"
+    assert external.copick_object_name("ribosome") == "ribosome"
+

@@ -837,6 +837,9 @@ def easymode(
     see ``bounded_workers``), a positive integer = exactly that many.
     """
     user = "easymode"
+    # copick-side names: what the segmentations and picks are stored and looked up under. The
+    # easymode names (``models``) are what copick-easymode is asked to run.
+    objects = [external.copick_object_name(m) for m in models]
     if isinstance(conversion_workers, bool) or (conversion_workers is not None and (not isinstance(conversion_workers, int) or conversion_workers < 0)):
         raise ValueError("conversion_workers must be a positive integer, or 0/None for automatic")
     explicit_workers = conversion_workers or None
@@ -851,7 +854,7 @@ def easymode(
     localization = {"backend": conversion_backend}
     if conversion_backend == "octopi":
         localization.update(method=localization_method, executable=settings.octopi_exe(),
-            objects=octopi_localization.radius_settings(config, models, voxel_a, localization_method, radius_min_scale, radius_max_scale, maxima_filter_size),
+            objects=octopi_localization.radius_settings(config, objects, voxel_a, localization_method, radius_min_scale, radius_max_scale, maxima_filter_size),
             reports={}, inactive_legacy_options=["min_particle_size", "max_particle_size"])
     else:
         localization.update(maxima_filter_size=maxima_filter_size, min_particle_size=min_particle_size, max_particle_size=max_particle_size)
@@ -867,7 +870,7 @@ def easymode(
     if reuse_segmentation_session:
         recovery = validate_reuse(
             config=config, out_dir=out_dir, source_session=source_session, output_session=session_id,
-            runs=selected, models=models, tomo_type=tomo_type, voxel_a=voxel_a,
+            runs=selected, models=objects, tomo_type=tomo_type, voxel_a=voxel_a,
             tta=tta, threshold=threshold, batch_size=batch_size)
         shards = {"workers": [], "n_workers": 0, "devices": [], "skipped_existing": selected,
                   "status": "reused completed source session", "source_session": source_session,
@@ -877,8 +880,8 @@ def easymode(
     else:
         hooks = shard_hooks or {}
         shards = shard.run_easymode_sharded(
-            out_dir=out_dir, config=config, runs=selected, models=models, user_id=user, session_id=session_id, voxel_a=voxel_a,
-            argv_for=argv_for, gpus=gpus, use_gpu=use_gpu, threads=threads, max_workers=max_workers, dry_run=runner.dry_run, **hooks)
+            out_dir=out_dir, config=config, runs=selected, models=objects, features=models, user_id=user, session_id=session_id,
+            voxel_a=voxel_a, argv_for=argv_for, gpus=gpus, use_gpu=use_gpu, threads=threads, max_workers=max_workers, dry_run=runner.dry_run, **hooks)
     for w in shards["workers"]:
         runner.log.append(["<worker>", f"gpu={w['gpu']}", *w["argv"]])
     # seg2picks loads one whole segmentation per worker: bound the parallelism by the job's
@@ -892,7 +895,7 @@ def easymode(
     if recovery is not None:
         recovery["conversion_workers"] = seg2picks_workers
     print(f"seg2picks: {seg2picks_workers} worker(s) ({seg2picks_accounting})", flush=True)
-    for model in models:
+    for model in objects:
         if conversion_backend == "legacy_seg2picks":
             runner.run(external.seg2picks_argv(
                 config=str(config), seg_name=model, seg_user=user, seg_session=source_session, voxel_a=voxel_a,
@@ -912,7 +915,7 @@ def easymode(
                 localization["reports"][model] = octopi_localization.validate_report(
                     report_path, config=config, runs=selected, model=model,
                     source_session=source_session, output_session=session_id)
-    primary = models[0]
+    primary = objects[0]
     # One centre per particle: seg2picks yields a centroid per watershed fragment, so a
     # fragmented prediction of one ribosome gives several picks inside it (see tools/dedupe).
     # The Octopi backend merges close centroids itself (upstream remove_repeated_picks at 0.5 x radius); the
@@ -944,8 +947,9 @@ def easymode(
         config=config, out_dir=out_dir, picks_uri=external.seg_uri(primary, picks_user, session_id), tomo_type=tomo_type,
         voxel_a=voxel_a, layout=layout, runs=runs, session_id=session_id, job_type="copick.easymode",
         orientations="identity_initialisation", tilt_series_pixel_size_a=_project_tilt_pixel_size(config),
-        source={"kind": "copick-segmentation", "tool": "copick-easymode", "models": models,
-                "segmentations": [external.seg_uri(m, user, source_session, voxel_a) for m in models],
+        source={"kind": "copick-segmentation", "tool": "copick-easymode", "models": models, "objects": objects,
+                "models_fetch": shards.get("models_fetch"),
+                "segmentations": [external.seg_uri(m, user, source_session, voxel_a) for m in objects],
                 "source_session": source_session, "inference_skipped": bool(reuse_segmentation_session),
                 "conversion_workers": seg2picks_workers, "recovery": recovery,
                 "raw_picks_uri": external.seg_uri(primary, user, session_id), "merge_close_picks": merge_report,

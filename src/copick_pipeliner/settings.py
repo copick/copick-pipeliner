@@ -17,6 +17,10 @@ from pathlib import Path
 ENV_COPICK = "PIPELINER_COPICK_EXECUTABLE"
 ENV_OCTOPI = "PIPELINER_OCTOPI_EXECUTABLE"
 ENV_TOOLS = "PIPELINER_COPICK_PIPELINER_TOOLS_EXECUTABLE"
+#: Where easymode keeps its weights, overriding ``MODEL_DIRECTORY`` in ``~/easymode/settings.txt``
+#: for this job only (in memory; the user's settings file is not changed). One directory shared by
+#: every job and user of a deployment means each model is downloaded once, not per image or home.
+ENV_EASYMODE_MODELS = "COPICK_PIPELINER_EASYMODE_MODELS"
 
 TOOLS_NAME = "copick-pipeliner-tools"
 
@@ -54,3 +58,10 @@ def tools_exe() -> str:
         if sibling.is_file():
             return str(sibling)
     return shutil.which(TOOLS_NAME) or TOOLS_NAME
+
+
+def easymode_model_dir() -> str | None:
+    """The deployment's easymode model directory (``COPICK_PIPELINER_EASYMODE_MODELS``), or
+    None when unset, in which case easymode's own setting stands."""
+    configured = (os.environ.get(ENV_EASYMODE_MODELS) or "").strip()
+    return os.path.abspath(os.path.expanduser(configured)) if configured else None
