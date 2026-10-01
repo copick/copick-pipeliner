@@ -46,13 +46,18 @@ def _common(func):
 @click.option("--copick-object", default=None, help="Registered copick object to store the picks under (default: the annotation object name).")
 @click.option("--run-prefix", default="", help="Prefix stripped from project run names before matching portal runs.")
 @click.option("--import-into-copick/--no-import-into-copick", default=True)
-def portal_picks(out_dir, session_id, threads, runs, dry_run, config, dataset_dir, object_name, deposition_id, shape, layout, user_id, tomogram_id, copick_object, run_prefix, import_into_copick):
+@click.option("--method-type", default=None, help="Portal annotation method type (e.g. manual, automated); default any.")
+@click.option("--ground-truth", type=click.Choice(["any", "yes", "no"]), default="any", help="Portal ground-truth status.")
+@click.option("--annotation-file-ids", default=None, help="Comma-separated portal annotation file ids to take exactly (portal-backed projects).")
+def portal_picks(out_dir, session_id, threads, runs, dry_run, config, dataset_dir, object_name, deposition_id, shape, layout, user_id, tomogram_id, copick_object, run_prefix, import_into_copick, method_type, ground_truth, annotation_file_ids):
     """Deposited portal picks -> copick (optional) -> particles.star (+ coordinates/) + picks_manifest.json."""
     manifest = orchestrate.portal_picks(
         config=Path(config) if config else None, out_dir=Path(out_dir), session_id=session_id, object_name=object_name,
         deposition_id=deposition_id, shape=shape, layout=layout, runs=_runs(runs), user_id=user_id,
         import_into_copick=import_into_copick, dataset_dir=Path(dataset_dir) if dataset_dir else None, tomogram_id=tomogram_id,
-        copick_object=copick_object, run_prefix=run_prefix,
+        copick_object=copick_object, run_prefix=run_prefix, method_type=method_type or None,
+        ground_truth={"any": None, "yes": True, "no": False}[ground_truth],
+        annotation_file_ids=[int(x) for x in annotation_file_ids.replace(" ", "").split(",") if x] if annotation_file_ids else None,
     )
     click.echo(json.dumps(manifest["totals"]))
 
@@ -68,9 +73,11 @@ def portal_picks(out_dir, session_id, threads, runs, dry_run, config, dataset_di
 @click.option("--objects", default="ribosome:150,membrane:0,sample:0,vacuum:0,boundary:0", help="name:radiusA list; radius 0 = segmentation-only object.")
 @click.option("--overlay-root", type=click.Path(file_okay=False), default=None)
 @click.option("--link-volumes/--copy-volumes", default=True, help="Reference an existing OME-zarr in place (default) instead of converting it into the overlay.")
-def project(out_dir, session_id, threads, runs, dry_run, dataset_dir, tomograms_star, base_dir, tomo_type, voxel_size, tomogram_id, objects, overlay_root, link_volumes):
+@click.option("--selection", type=click.Path(exists=True, dir_okay=False), default=None, help="A resolved portal_selection.json: a portal-backed project whose tomograms stream from the portal.")
+def project(out_dir, session_id, threads, runs, dry_run, dataset_dir, tomograms_star, base_dir, tomo_type, voxel_size, tomogram_id, objects, overlay_root, link_volumes, selection):
     """Create the copick project (config + tomograms) for this RELION project."""
     manifest = orchestrate.project(
+        selection=Path(selection) if selection else None,
         out_dir=Path(out_dir), session_id=session_id, tomo_type=tomo_type, voxel_a=voxel_size, runs=_runs(runs), objects=objects,
         dataset_dir=Path(dataset_dir) if dataset_dir else None, tomograms_star=Path(tomograms_star) if tomograms_star else None,
         base_dir=Path(base_dir), tomogram_id=tomogram_id, overlay_root=Path(overlay_root) if overlay_root else None,
@@ -93,7 +100,7 @@ def _gpu_options(func):
 @_gpu_options
 @click.option("--config", type=click.Path(exists=True, dir_okay=False), required=True)
 @click.option("--models", default="ribosome")
-@click.option("--tomo-type", default="wbp")
+@click.option("--tomo-type", default="wbp", help="copick tomogram type; an empty value reads the type the project records.")
 @click.option("--voxel-size", type=float, required=True)
 @click.option("--tta", type=int, default=4)
 @click.option("--threshold", type=float, default=0.5)
@@ -115,7 +122,7 @@ def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
     """copick-easymode segmentation (one worker per allocated GPU) -> seg2picks -> particles.star."""
     manifest = orchestrate.easymode(
         config=Path(config), out_dir=Path(out_dir), session_id=session_id, models=[m.strip() for m in models.split(",") if m.strip()],
-        tomo_type=tomo_type, voxel_a=voxel_size, runs=_runs(runs), tta=tta, threshold=threshold, batch_size=batch_size,
+        tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type), voxel_a=voxel_size, runs=_runs(runs), tta=tta, threshold=threshold, batch_size=batch_size,
         maxima_filter_size=maxima_filter_size, min_particle_size=min_particle_size, max_particle_size=max_particle_size,
         layout=layout, gpus=gpus, use_gpu=not no_gpu, threads=threads, runner=Runner(dry_run=dry_run), max_workers=max_workers,
         conversion_workers=conversion_workers, reuse_segmentation_session=reuse_segmentation_session,
@@ -130,7 +137,7 @@ def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
 @_gpu_options
 @click.option("--config", type=click.Path(exists=True, dir_okay=False), required=True)
 @click.option("--in-picks", type=click.Path(exists=True, dir_okay=False), required=True, help="Upstream particles.star (its sibling manifest names the picks).")
-@click.option("--tomo-type", default="wbp")
+@click.option("--tomo-type", default="wbp", help="copick tomogram type; an empty value reads the type the project records.")
 @click.option("--voxel-size", type=float, required=True)
 @click.option("--boundary-voxel-size", type=float, default=20.0)
 @click.option("--model", default="tomogram-boundary")
@@ -140,7 +147,7 @@ def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
 def boundary(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, in_picks, tomo_type, voxel_size, boundary_voxel_size, model, ntta, layout, reuse_boundary_session):
     """octopi tomogram-boundary -> sample mask -> picksin -> particles.star."""
     manifest = orchestrate.boundary(
-        config=Path(config), out_dir=Path(out_dir), session_id=session_id, in_picks=Path(in_picks), tomo_type=tomo_type,
+        config=Path(config), out_dir=Path(out_dir), session_id=session_id, in_picks=Path(in_picks), tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type),
         voxel_a=voxel_size, boundary_voxel_a=boundary_voxel_size, model=model, ntta=ntta, runs=_runs(runs), layout=layout,
         gpus=gpus, use_gpu=not no_gpu, threads=threads, runner=Runner(dry_run=dry_run), reuse_boundary_session=reuse_boundary_session,
     )
@@ -151,14 +158,14 @@ def boundary(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
 @_common
 @_gpu_options
 @click.option("--config", type=click.Path(exists=True, dir_okay=False), required=True)
-@click.option("--tomo-type", default="wbp")
+@click.option("--tomo-type", default="wbp", help="copick tomogram type; an empty value reads the type the project records.")
 @click.option("--voxel-size", type=float, required=True)
 @click.option("--membrain-voxel-size", type=float, default=10.0)
 @click.option("--threshold", type=float, default=0.0)
 def membrain(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, tomo_type, voxel_size, membrain_voxel_size, threshold):
     """MemBrain-seg membranes through copick-torch -> segmentations.json."""
     manifest = orchestrate.membrain(
-        config=Path(config), out_dir=Path(out_dir), session_id=session_id, tomo_type=tomo_type, voxel_a=voxel_size,
+        config=Path(config), out_dir=Path(out_dir), session_id=session_id, tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type), voxel_a=voxel_size,
         membrain_voxel_a=membrain_voxel_size, threshold=threshold, runs=_runs(runs), gpus=gpus, use_gpu=not no_gpu,
         runner=Runner(dry_run=dry_run),
     )
@@ -169,7 +176,7 @@ def membrain(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
 @_common
 @click.option("--config", type=click.Path(exists=True, dir_okay=False), required=True)
 @click.option("--picks-uri", required=True, help="object:user_id/session_id")
-@click.option("--tomo-type", default="wbp")
+@click.option("--tomo-type", default="wbp", help="copick tomogram type; an empty value reads the type the project records.")
 @click.option("--voxel-size", type=float, required=True)
 @click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
 @click.option("--orientations", type=click.Choice(["measured", "identity_initialisation"]), default="identity_initialisation")
@@ -178,7 +185,7 @@ def export_star(out_dir, session_id, threads, runs, dry_run, config, picks_uri, 
     from .export_star import export_copick_picks
 
     manifest = export_copick_picks(
-        config=Path(config), out_dir=Path(out_dir), picks_uri=picks_uri, tomo_type=tomo_type, voxel_a=voxel_size, layout=layout,
+        config=Path(config), out_dir=Path(out_dir), picks_uri=picks_uri, tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type), voxel_a=voxel_size, layout=layout,
         runs=_runs(runs), session_id=session_id, job_type="copick.export", orientations=orientations,
     )
     click.echo(json.dumps(manifest["totals"]))

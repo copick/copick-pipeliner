@@ -355,6 +355,135 @@ def export_portal_picks(
                             tilt_px_a=tilt_px_a, oriented_all=oriented_all)
 
 
+def export_selection_picks(
+    *,
+    selection_path: Path,
+    out_dir: Path,
+    object_name: str,
+    deposition_id: int | str | None,
+    shape: str,
+    layout: str,
+    runs: list[str] | None,
+    session_id: str,
+    user_id: str = "data-portal",
+    job_type: str = "copick.portalpicks",
+    config: Path | None = None,
+    method_type: str | None = None,
+    ground_truth: bool | None = None,
+    annotation_file_ids: list[int] | None = None,
+    copick_root=None,
+    copick_object: str | None = None,
+) -> dict:
+    """Deposited picks of a portal-backed project's runs, from the portal API, in the selected tomograms' frames.
+
+    The runs, their tomograms (geometry) and alignments come from the resolved selection (``portal_selection.json``);
+    each run's annotation file is chosen by :func:`portal_api.choose` among the files on that alignment and voxel
+    spacing, and the manifest pins its id (copick's portal session id). ``rlnTomoName`` is the run name, which is the
+    portal run id in a portal-backed project and in the zarr-particle-tools import.
+    """
+    from . import portal_api
+    from . import portal_selection as selection_io
+
+    if layout not in LAYOUTS:
+        raise ValueError(f"unknown STAR layout {layout!r}; choose one of {LAYOUTS}")
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    selection = selection_io.read_selection(selection_path)
+    records = selection_io.run_records(selection)
+    if runs:
+        unknown = sorted(set(runs) - set(records))
+        if unknown:
+            raise LookupError(f"runs {unknown} are not in the selection {sorted(records)}")
+        records = {name: records[name] for name in runs}
+    target_object = copick_object or object_name
+    manifest = new_manifest("picks", job_type=job_type, session_id=session_id, user_id=user_id, config=str(config) if config else None)
+    manifest["object"] = target_object
+    manifest["source"] = {
+        "kind": "portal-api",
+        "selection": str(selection_path),
+        "dataset_ids": selection_io.dataset_ids(selection),
+        "object_name": object_name,
+        "deposition_id": int(deposition_id) if deposition_id not in (None, "") else None,
+        "shape": portal_api.SHAPES.get(str(shape).lower(), shape),
+        "method_type": method_type or None,
+        "ground_truth": ground_truth,
+        "annotation_file_ids": sorted(annotation_file_ids) if annotation_file_ids else None,
+    }
+    available = portal_api.candidates(records)
+    chosen = {
+        name: portal_api.choose(
+            name,
+            available[name],
+            object_name=object_name,
+            deposition_id=deposition_id,
+            shape=shape,
+            method_type=method_type,
+            ground_truth=ground_truth,
+            pinned=annotation_file_ids,
+        )
+        for name in records
+    }
+    if annotation_file_ids:
+        unused = sorted(set(annotation_file_ids) - {f.annotation_file_id for files in chosen.values() for f in files})
+        if unused:
+            raise LookupError(f"pinned annotation files {unused} are not on any selected run's alignment and voxel spacing")
+
+    tables_by_run: dict[str, pd.DataFrame] = {}
+    tilt_pixel_sizes: dict[str, float | None] = {}
+    oriented_all = True
+    for name, files in chosen.items():
+        record = records[name]
+        geometry = selection_io.geometry(record)
+        positions, orientations, provenance = [], [], []
+        for f in files:
+            pos_vox, mats = portal_api.read_points(f.uri)
+            positions.append(voxels_to_angstrom(pos_vox, geometry.voxel_a))
+            orientations.append(mats)
+            provenance.append({**f.provenance(), "n_points": int(pos_vox.shape[0])})
+        pos_a = np.concatenate(positions) if positions else np.zeros((0, 3))
+        oriented = bool(orientations) and all(m is not None for m in orientations)
+        mats = np.concatenate(orientations) if oriented else None
+        oriented_all = oriented_all and oriented
+        inside = within_volume(pos_a, geometry)
+        tables_by_run[name] = particles_table(name, pos_a, geometry, layout=layout, matrices=mats)
+        tilt_pixel_sizes[name] = float(record["tiltseries_pixel_size"])
+        picks_uri = None
+        if copick_root is not None and len(pos_a):
+            picks_uri = _store_copick_picks(copick_root, name, target_object, user_id, session_id, pos_a, mats)
+        manifest["runs"][name] = {
+            "portal_run": record.get("run_name"),
+            "n_picks": int(pos_a.shape[0]),
+            "n_outside_volume": int((~inside).sum()),
+            "oriented": oriented,
+            "annotation_files": provenance,
+            "tomogram": {
+                "tomogram_id": record["tomogram_id"],
+                "alignment_id": record["alignment_id"],
+                "voxel_spacing_id": record["voxel_spacing_id"],
+                "uri": record["tomogram_uri"],
+            },
+            "geometry": geometry.as_dict(),
+            "tilt_series_pixel_size_a": tilt_pixel_sizes[name],
+            "picks_uri": picks_uri,
+        }
+        if len(files) > 1:
+            manifest["notes"].append(f"{name}: {len(files)} pinned annotation files merged; duplicates are not removed")
+    if not any(len(t) for t in tables_by_run.values()):
+        raise LookupError("no picks in any selected run")
+    manifest["tomogram_voxel_size_a"] = _consistent_value(selection_io.geometry(r).voxel_a for r in records.values())
+    tilt_px_a = _single_tilt_pixel_size(tilt_pixel_sizes, layout, manifest)
+    manifest["tilt_series_pixel_size_a"] = tilt_px_a
+    if copick_root is None:
+        manifest["notes"].append("picks were not stored in a copick project (storage not requested)")
+    return _finish_manifest(manifest, out_dir=out_dir, layout=layout, tables_by_run=tables_by_run,
+                            tilt_px_a=tilt_px_a, oriented_all=oriented_all)
+
+
+def _consistent_value(values) -> float | None:
+    known = {float(v) for v in values}
+    return known.pop() if len(known) == 1 else None
+
+
 def _store_copick_picks(root, run_name: str, object_name: str, user_id: str, session_id: str, pos_a: np.ndarray, mats) -> str:
     """Store picks in an opened copick project; returns the URI ``object:user/session``.
 

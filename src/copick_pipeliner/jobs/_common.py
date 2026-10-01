@@ -119,10 +119,13 @@ class CopickJobBase(PipelinerJob):
 
     def add_tomogram_options(self, *, voxel_required: bool) -> None:
         self.joboptions["tomo_type"] = StringJobOption(
-            label="Tomogram type:",
+            label="Tomogram type (empty = the project's):",
             default_value="wbp",
-            help_text="copick tomogram type (algorithm name) to read, e.g. wbp.",
-            is_required=True,
+            help_text=(
+                "copick tomogram type to read, e.g. wbp. Empty reads the type the copick.project job recorded, which "
+                "is how a portal-backed project names each run's selected portal tomogram."
+            ),
+            is_required=False,
         )
         if voxel_required:
             self.joboptions["voxel_size"] = FloatJobOption(

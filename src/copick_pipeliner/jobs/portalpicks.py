@@ -84,6 +84,27 @@ class CopickPortalPicksJob(CopickJobBase):
             ),
             is_required=False,
         )
+        self.joboptions["method_type"] = StringJobOption(
+            label="Annotation method type (empty = any):",
+            default_value="",
+            help_text="Portal annotation method type, e.g. manual or automated (portal-backed projects).",
+            is_required=False,
+        )
+        self.joboptions["ground_truth"] = MultipleChoiceJobOption(
+            label="Ground-truth status:",
+            choices=["any", "yes", "no"],
+            default_value="any",
+            help_text="Narrow by the portal's ground-truth flag (portal-backed projects).",
+        )
+        self.joboptions["annotation_file_ids"] = StringJobOption(
+            label="Annotation file ids (pins, comma list):",
+            default_value="",
+            help_text=(
+                "Take exactly these portal annotation files (portal-backed projects); the only way to take several "
+                "files of one run. They must lie on each run's selected alignment and voxel spacing."
+            ),
+            is_required=False,
+        )
         self.add_runs_option()
         self.add_layout_option()
         self.joboptions["user_id"] = StringJobOption(
@@ -114,6 +135,9 @@ class CopickPortalPicksJob(CopickJobBase):
         args += ["--shape", jo["annotation_shape"].get_string()]
         args += ["--layout", jo["star_layout"].get_string()]
         args += ["--user-id", jo["user_id"].get_string()]
+        args += opt("--method-type", jo["method_type"].get_string())
+        args += ["--ground-truth", jo["ground_truth"].get_string()]
+        args += opt("--annotation-file-ids", jo["annotation_file_ids"].get_string())
         args += self.runs_args()
         args += switch("--import-into-copick", "--no-import-into-copick", jo["import_into_copick"].get_boolean())
         return [self.tool_command(args)]

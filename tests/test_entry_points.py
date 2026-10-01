@@ -62,12 +62,14 @@ def test_project_and_membrain_nodes():
 
 
 def test_project_alternation_is_the_sibling_empty_shape():
+    """Three sources, each required unless one of the other two is given (ALL of (sibling == ""))."""
     job = new_job_of_type("copick.project")
-    a = job.joboptions["in_tomograms"].required_if
-    b = job.joboptions["dataset_dir"].required_if
-    assert [tuple(c) for c in a.conditions] == [("dataset_dir", "=", "")]
-    assert [tuple(c) for c in b.conditions] == [("in_tomograms", "=", "")]
-    assert job.joboptions["in_tomograms"].is_required is False
+    members = ("in_tomograms", "dataset_dir", "in_selection")
+    for member in members:
+        condition = job.joboptions[member].required_if
+        assert condition.operation == "ALL"
+        assert sorted(tuple(c) for c in condition.conditions) == sorted((m, "=", "") for m in members if m != member)
+        assert job.joboptions[member].is_required is False
 
 
 def test_session_id_is_the_job_number():

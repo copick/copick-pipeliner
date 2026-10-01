@@ -11,8 +11,6 @@ from scipy.spatial.transform import Rotation
 
 from copick_pipeliner import settings
 
-MIRROR = Path("/mnt/main0/projects/cryoet/10426")
-
 
 @pytest.fixture(autouse=True)
 def fake_executables(monkeypatch, tmp_path_factory):
@@ -119,10 +117,3 @@ def synthetic_dataset(tmp_path):
     pts_b = rng.uniform(0, [100, 200, 300], size=(2, 3))
     make_portal_run(dataset, "run_b", points_vox=pts_b, matrices=Rotation.random(2, random_state=5).as_matrix(), annotation_id=7)
     return {"dataset": dataset, "matrices_a": mats, "points_a": pts_a, "points_b": pts_b}
-
-
-@pytest.fixture
-def real_mirror():
-    if not (MIRROR / "tomo153" / "run_metadata.json").is_file():
-        pytest.skip(f"portal mirror {MIRROR} not available")
-    return MIRROR
