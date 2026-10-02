@@ -383,6 +383,8 @@ def test_storage_round_trip_in_a_real_copick_project(synthetic_dataset, tmp_path
     assert len(picks) == 1
     positions, transforms = picks[0].numpy()
     assert np.allclose(np.sort(positions, axis=0), np.sort(synthetic_dataset["points_a"] * 10.0, axis=0), atol=1e-6)
+    # The position is stored once: copick's particle centre is location + translation, so the translation is zero.
+    assert np.allclose(np.asarray(transforms)[:, :3, 3], 0.0)
     assert np.allclose(np.asarray(transforms)[:, :3, :3].round(6), np.asarray(synthetic_dataset["matrices_a"]).round(6)) or True
     # An unregistered target object is refused, never silently stored under another name.
     with pytest.raises(LookupError, match="not registered"):
