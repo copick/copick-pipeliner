@@ -502,7 +502,8 @@ def _store_copick_picks(root, run_name: str, object_name: str, user_id: str, ses
     transforms = np.tile(np.eye(4), (n, 1, 1))
     if mats is not None:
         transforms[:, :3, :3] = mats
-    transforms[:, :3, 3] = pos_a  # copick keeps positions in Angstrom
+    # The position is the pick's location (Angstrom). The transform's translation stays zero: copick adds it to the
+    # location (a pick's centre is location + translation), so repeating the position there would double it.
     pick_set.from_numpy(pos_a, transforms)
     pick_set.store()
     return f"{object_name}:{user_id}/{session_id}"
