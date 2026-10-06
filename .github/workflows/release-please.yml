@@ -1,0 +1,75 @@
+name: Create Release PRs
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: release please
+        uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          manifest-file: ".release-please.manifest.json"
+          config-file: "release-please.config.json"
+          target-branch: "main"
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      sha: ${{ steps.release.outputs.sha }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+
+  # copick-pipeliner is released on GitHub only (not on PyPI): the built distributions are attached to the release.
+  attach-distributions:
+    name: Build and attach distributions to the GitHub release
+    runs-on: ubuntu-latest
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    steps:
+      - name: Checkout released commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.7.13"
+          python-version: "3.12"
+
+      - name: build
+        run: |
+          uv build
+
+      - name: Check the built version is the release's
+        env:
+          RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
+        run: >
+          uv run --no-project --with packaging python -c
+          "import glob, os, sys; from packaging.version import Version;
+          want = Version(os.environ['RELEASE_VERSION']);
+          got = Version(os.path.basename(glob.glob('dist/*.whl')[0]).split('-')[1]);
+          print(f'release {want}, built {got}');
+          sys.exit(0 if got == want else f'Built {got}, but the release is {want}: pyproject.toml or src/copick_pipeliner/__init__.py was not bumped.')"
+
+      - name: Attach distributions to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: gh release upload "$TAG_NAME" dist/* --repo "$GITHUB_REPOSITORY"
