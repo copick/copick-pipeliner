@@ -292,6 +292,28 @@ def test_project_config_and_objects(tmp_path):
     assert "radius" not in config["pickable_objects"][1]
 
 
+@pytest.mark.parametrize("spec, polar", [("microtubule:120:filament:polar", True), ("actin:35:filament:apolar", False),
+                                         ("tube:60:filament", None)])
+def test_filament_objects_are_declared_the_way_copick_reads_them(tmp_path, spec, polar):
+    copick_mod = pytest.importorskip("copick")
+    objects = orchestrate.parse_objects(f"ribosome:150,{spec},membrane:0")
+    name = spec.split(":", 1)[0]
+    entry = objects[1]
+    assert entry["is_particle"] is True and entry["label"] == 2 and entry["radius"] == float(spec.split(":")[1])
+    assert entry["metadata"] == {"copick": {"filament": {} if polar is None else {"polar": polar}}}
+    assert "metadata" not in objects[0] and "metadata" not in objects[2]   # name:radius is unchanged
+    config = orchestrate.write_copick_config(tmp_path / "copick_config.json", name="f", overlay_root=tmp_path / "ov", objects=objects)
+    root = copick_mod.from_file(str(config))
+    assert root.get_object(name).is_filament and root.get_object(name).filament.polar is polar
+    assert not root.get_object("ribosome").is_filament
+
+
+@pytest.mark.parametrize("bad", ["mt:0:filament", "mt:120:filement", "mt:120:filament:bipolar", "mt:120:filament:polar:x"])
+def test_a_malformed_filament_object_is_refused(bad):
+    with pytest.raises(ValueError, match="filament|name:radius"):
+        orchestrate.parse_objects(bad)
+
+
 def test_project_portal_form_composes_one_add_per_run_and_writes_manifest(synthetic_dataset, tmp_path):
     from copick_pipeliner.tools.external import Runner
 
