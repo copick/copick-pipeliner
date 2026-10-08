@@ -109,7 +109,7 @@ def _gpu_options(func):
 @click.option("--min-particle-size", type=int, default=1000)
 @click.option("--max-particle-size", type=int, default=50000)
 @click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
-@click.option("--max-workers", type=int, default=None, help="Cap on parallel inference workers (default: one per visible GPU).")
+@click.option("--max-workers", type=int, default=None, help="Cap on copick-easymode's inference workers (default: one per visible GPU).")
 @click.option("--conversion-workers", type=click.IntRange(min=0), default=0, help="seg2picks workers; 0 = automatic (bounded by memory and volume size).")
 @click.option("--reuse-segmentation-session", default="", help="Completed sibling job's session whose segmentations are converted into this session; no inference.")
 @click.option("--merge-close-picks/--no-merge-close-picks", default=True, help="Merge picks closer than the minimum separation into one centre (default on).")
@@ -119,7 +119,7 @@ def _gpu_options(func):
 @click.option("--radius-min-scale", type=float, default=0.5, help="Octopi backend: minimum accepted radius as a fraction of the object radius (also its centroid-merge distance).")
 @click.option("--radius-max-scale", type=float, default=1.0, help="Octopi backend: maximum accepted radius as a fraction of the object radius.")
 def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, models, tomo_type, voxel_size, tta, threshold, batch_size, maxima_filter_size, min_particle_size, max_particle_size, layout, max_workers, conversion_workers, reuse_segmentation_session, merge_close_picks, min_separation_a, conversion_backend, localization_method, radius_min_scale, radius_max_scale):
-    """copick-easymode segmentation (one worker per allocated GPU) -> seg2picks -> particles.star."""
+    """copick-easymode segmentation (its own worker per allocated GPU) -> localization -> particles.star."""
     manifest = orchestrate.easymode(
         config=Path(config), out_dir=Path(out_dir), session_id=session_id, models=[m.strip() for m in models.split(",") if m.strip()],
         tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type), voxel_a=voxel_size, runs=_runs(runs), tta=tta, threshold=threshold, batch_size=batch_size,

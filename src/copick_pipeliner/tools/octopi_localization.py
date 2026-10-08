@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import Path
 import numpy as np
-from . import external, shard
+from . import external
 from .. import settings
 
 BACKENDS=('octopi','legacy_seg2picks')
@@ -36,7 +36,7 @@ def radius_settings(config, models, voxel_a, method, min_scale, max_scale, filte
 
 def adapter_argv(*, config, report, runs, model, source_session, output_session, voxel_a, method, min_scale, max_scale, filter_size, workers):
     executable=settings.octopi_exe()
-    interpreter=shard.copick_interpreter(executable)
+    interpreter=external.copick_interpreter(executable)
     if interpreter is None:raise ValueError(f'Cannot locate the Python environment of configured Octopi executable {executable!r}')
     external.check_safe(str(config),str(report),model,source_session,output_session,*runs)
     if not runs or workers<1:raise ValueError('Octopi localization requires selected runs and positive conversion_workers')

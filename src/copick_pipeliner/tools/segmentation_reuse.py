@@ -24,8 +24,9 @@ def validate_reuse(*, config: Path, out_dir: Path, source_session: str, output_s
     """Check prior completion evidence and array metadata without loading image voxels.
 
     Array headers alone cannot prove a completed write. Require the completed
-    sibling job's shard manifest, which was written after every worker returned
-    successfully and every requested segmentation passed the existing checks.
+    sibling job's inference manifest (``easymode_shards.json``), which was written
+    after its inference returned successfully and every requested segmentation
+    passed the existing checks. Manifests of every version share the fields read here.
     """
     import copick
     import zarr

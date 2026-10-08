@@ -245,3 +245,20 @@ segmentations into this job's session without inference (`segmentation_reuse.val
 inference. `conversion_workers`: 0 (default) = automatic bound by the job's memory and volume size (0.1.9),
 N = exactly N, fed to both backends. `maxima_filter_size` is Octopi's watershed `filter_size` (default 10) and
 seg2picks' maxima filter (set 9 to reproduce pre-0.1.12 jobs).
+
+## Unreleased: copick-easymode runs its own GPU workers
+
+copick-easymode 0.4.0 does what 0.1.6 (`tools/shard.py`) and 0.1.8 (`tools/easymode_worker.py`) did here: one
+worker process per GPU of the allocation (`--gpus` validated against it, `--max-workers`, `--cpu`, `--threads`
+divided among the workers), the models resolved once in the parent and the workers kept offline (`--model-dir`,
+fed from `COPICK_PIPELINER_EASYMODE_MODELS`), the settings-file import race serialized, a non-zero exit on any run
+error, missing model or dead worker, and a JSON `--report`. Both modules and their tests are gone; the octopi
+adapter's interpreter lookup moved to `external.copick_interpreter`.
+
+`tools/easymode_inference.py` runs ONE `copick inference easymode` with `-r <runs not yet segmented>` and keeps
+what is the job's contract: the same-session pre-skip and the post-run completeness check (every requested
+segmentation exists with the tomogram's shape), and `InferenceError` before seg2picks/export on a non-zero exit, a
+missing or failed report, reported errors or a missing segmentation. `easymode_shards.json` keeps its name and the
+fields `validate_reuse` reads; its `workers` list now holds one entry, the invocation, with copick-easymode's per-GPU
+workers, devices and models beside it (`gpu_workers`, `devices`, `models_fetch`, `easymode_report`). Manifests
+written by 0.1.6-0.1.15 still validate for `reuse_segmentation_session`. Tests: `tests/test_easymode_inference.py`.

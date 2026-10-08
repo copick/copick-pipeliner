@@ -4,7 +4,8 @@ Runs ``copick inference easymode`` (pretrained easymode models, TensorFlow) on t
 project's tomograms at the stated voxel size, converts each requested model's binary
 segmentation to picks with Octopi (or explicit legacy seg2picks), and exports the picks
 with identity orientations (an initialisation, not a measurement -- the manifest says so).
-GPU job; belongs in the picking execution image.
+GPU job; belongs in the picking execution image. Inference is one ``copick inference easymode``
+(copick-easymode >= 0.4.0), which runs one worker per GPU of the allocation itself.
 """
 
 from __future__ import annotations

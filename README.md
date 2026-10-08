@@ -21,7 +21,7 @@ like any RELION job.
   They load in the pipeliner control process (ApexAgent's venv) and turn joboptions into one
   `copick-pipeliner-tools <verb> ...` command line.
 * **Tools** (`copick_pipeliner.tools`, console script `copick-pipeliner-tools`) run where the
-  scientific stack is: copick, copick-utils, and for the ML jobs copick-easymode/TensorFlow,
+  scientific stack is: copick, copick-utils, and for the ML jobs copick-easymode (>= 0.4.0)/TensorFlow,
   octopi/torch, copick-torch. They are found through `PIPELINER_COPICK_EXECUTABLE`,
   `PIPELINER_OCTOPI_EXECUTABLE` and (optionally) `PIPELINER_COPICK_PIPELINER_TOOLS_EXECUTABLE`,
   the same convention as pipeliner's `PIPELINER_CTFFIND_EXECUTABLE`. Install this package in
@@ -91,23 +91,29 @@ TensorFlow and torch environments can therefore share the same job plugin withou
 combining the frameworks. Octopi is a separate runtime dependency; installing this
 package alone does not install the ML tools or their weights.
 
-## easymode weights (0.1.14)
+## easymode inference and weights
+
+A `copick.easymode` job runs one `copick inference easymode` and requires **copick-easymode >= 0.4.0**, which runs
+one worker process per GPU of the job's allocation itself (`gpu_ids` narrows the set, `use_gpu=No` runs one CPU
+worker), splits the runs between them, and exits non-zero when any run fails. Runs that this job's session has
+already segmented are skipped, and the job stops before localization or export unless every requested segmentation
+exists with its tomogram's shape. `easymode_shards.json` in the job directory records the invocation and, from
+copick-easymode's own report (`easymode_report.json`), the devices, the per-GPU workers and the models used.
 
 easymode keeps its weights in one directory, `MODEL_DIRECTORY` in `~/easymode/settings.txt` (default
-`~/easymode`), with no environment override. Set `COPICK_PIPELINER_EASYMODE_MODELS` to a directory every job can
-read, and the job uses it instead, in memory: the settings file is left as it is. Shared by a deployment, each model
-is downloaded once rather than per user, image or job.
+`~/easymode`). Set `COPICK_PIPELINER_EASYMODE_MODELS` to a directory every job can read, and the job passes it as
+`--model-dir`: easymode uses it for that run, in memory, and the settings file is left as it is. Shared by a
+deployment, each model is downloaded once rather than per user, image or job.
 
-A `copick.easymode` job resolves its models once before inference, under a lock in that directory: easymode
-downloads what is missing or outdated when it is online and the directory is writable by the job's user; otherwise
-the job only finds what is there, and fails naming any model that is not. `easymode_models.json` in the job
-directory records each model's version tag, timestamp, path and size. The GPU workers then run easymode offline,
-so they neither reach the network nor write into the shared directory. Make a directory shared between users
-group-writable (`chmod g+ws`); jobs write into it with umask 002.
+copick-easymode resolves the job's models once before its workers start: it downloads what is missing or outdated
+when it is online and the directory is writable by the job's user; otherwise it only finds what is there, and the
+job fails naming any model that is not. The report records each model's version tag, timestamp, path and size. The
+workers then run offline, so they neither reach the network nor write into the shared directory. Make a directory
+shared between users group-writable (`chmod g+ws`); copick-easymode downloads into it with umask 002.
 
-Every easymode feature can be run, including the 2D-engine (`.scnm`) models, with copick-easymode >= 0.3.0. A
-feature name with underscores is stored in copick with dashes (`atp_synthase` is the object `atp-synthase`), which
-is the object the copick configuration must define, as a particle with a radius, for the Octopi backend.
+Every easymode feature can be run, including the 2D-engine (`.scnm`) models. A feature name with underscores is
+stored in copick with dashes (`atp_synthase` is the object `atp-synthase`), which is the object the copick
+configuration must define, as a particle with a radius, for the Octopi backend.
 
 For a new conversion of existing segmentations, set
 `reuse_segmentation_session=<prior job session>` on a fresh `copick.easymode` job.

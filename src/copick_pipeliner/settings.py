@@ -17,9 +17,10 @@ from pathlib import Path
 ENV_COPICK = "PIPELINER_COPICK_EXECUTABLE"
 ENV_OCTOPI = "PIPELINER_OCTOPI_EXECUTABLE"
 ENV_TOOLS = "PIPELINER_COPICK_PIPELINER_TOOLS_EXECUTABLE"
-#: Where easymode keeps its weights, overriding ``MODEL_DIRECTORY`` in ``~/easymode/settings.txt``
-#: for this job only (in memory; the user's settings file is not changed). One directory shared by
-#: every job and user of a deployment means each model is downloaded once, not per image or home.
+#: Where easymode keeps its weights, passed to ``copick inference easymode --model-dir``, which overrides
+#: ``MODEL_DIRECTORY`` in ``~/easymode/settings.txt`` for that run only (in memory; the user's settings file
+#: is not changed). One directory shared by every job and user of a deployment means each model is
+#: downloaded once, not per image or home.
 ENV_EASYMODE_MODELS = "COPICK_PIPELINER_EASYMODE_MODELS"
 
 TOOLS_NAME = "copick-pipeliner-tools"
