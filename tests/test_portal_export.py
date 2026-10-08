@@ -75,9 +75,11 @@ def test_import_centered_writes_an_index_and_one_coordinate_file_per_run(synthet
         assert list(blocks) == ["particles"]
         table = blocks["particles"]
         assert set(table["rlnTomoName"]) == {row["rlnTomoName"]}
-        for column in coords.CENTERED_COLUMNS + coords.EULER_COLUMNS + ("rlnOpticsGroup",):
+        for column in coords.CENTERED_COLUMNS + coords.EULER_COLUMNS:
             assert column in table.columns
-        for column in coords.UNCENTERED_COLUMNS:
+        # Deliberate change (copick's bundle writer): no rlnOpticsGroup without an optics table. RELION builds the
+        # optics groups from tomograms.star and overwrites the column anyway (particle_set.cpp:42-118).
+        for column in coords.UNCENTERED_COLUMNS + ("rlnOpticsGroup",):
             assert column not in table.columns
     assert manifest["particles_star_kind"] == "index"
     assert set(manifest["coordinate_files"]) == {"run_a", "run_b"}
@@ -113,7 +115,10 @@ def test_orientations_and_provenance_survive_both_layouts(synthetic_dataset, tmp
     )
     table = read_particles_star(out / "particles.star")
     run_a = table[table["rlnTomoName"] == "run_a"]
-    back = coords.relion_eulers_to_matrices(run_a.loc[:, list(coords.EULER_COLUMNS)].to_numpy(dtype=float))
+    from scipy.spatial.transform import Rotation
+
+    eulers = run_a.loc[:, list(coords.EULER_COLUMNS)].to_numpy(dtype=float)
+    back = Rotation.from_euler("ZYZ", eulers, degrees=True).inv().as_matrix()
     assert np.allclose(back, synthetic_dataset["matrices_a"], atol=1e-6)
     stored = read_manifest(out / "picks_manifest.json")
     assert stored == manifest
@@ -211,9 +216,11 @@ def test_relion5_optics_omits_the_pixel_size_when_no_tilt_series_record_exists(t
         shape="point", layout="relion5", runs=None, session_id="job001",
     )
     assert manifest["tilt_series_pixel_size_a"] is None
-    assert any("omitted" in note for note in manifest["notes"])
-    optics = starfile.read(tmp_path / "out" / "particles.star", always_dict=True)["optics"]
-    assert "rlnTomoTiltSeriesPixelSize" not in optics.columns
+    assert any("no optics table" in note for note in manifest["notes"])
+    # Deliberate change: no optics table at all rather than one without rlnTomoTiltSeriesPixelSize, which RELION
+    # refuses (particle_set.cpp:128); without one, RELION builds the optics from tomograms.star.
+    blocks = starfile.read(tmp_path / "out" / "particles.star", always_dict=True)
+    assert list(blocks) == ["particles"] and len(blocks["particles"]) == 1
 
 
 def test_known_plus_unknown_sampling_does_not_lend_the_value_to_the_unknown_run(tmp_path, make_run):
@@ -227,8 +234,8 @@ def test_known_plus_unknown_sampling_does_not_lend_the_value_to_the_unknown_run(
     assert manifest["runs"]["known"]["tilt_series_pixel_size_a"] == 2.5
     assert manifest["runs"]["unknown"]["tilt_series_pixel_size_a"] is None
     assert any("no tilt-series record for unknown" in note for note in manifest["notes"])
-    optics = starfile.read(tmp_path / "out" / "particles.star", always_dict=True)["optics"]
-    assert "rlnTomoTiltSeriesPixelSize" not in optics.columns
+    blocks = starfile.read(tmp_path / "out" / "particles.star", always_dict=True)
+    assert list(blocks) == ["particles"] and len(blocks["particles"]) == 2   # neither run borrows 2.5
 
 
 @pytest.mark.parametrize("bad", [0.0, -2.165, float("nan")])
@@ -250,14 +257,23 @@ def test_non_positive_tomogram_voxel_size_is_refused(tmp_path, make_run):
                             shape="point", layout="import_centered", runs=None, session_id="job001")
 
 
-def test_relion5_refuses_mixed_tilt_series_sampling(tmp_path, make_run):
+def test_relion5_writes_one_optics_group_per_run_for_mixed_tilt_series_sampling(tmp_path, make_run):
+    """Deliberate change: mixed samplings used to be refused (one optics row could not describe them); copick writes one
+    optics group per run, so each run keeps its own value."""
     dataset = tmp_path / "10996"
     dataset.mkdir()
     make_run(dataset, "r1", points_vox=[[1.0, 2.0, 3.0]], shape="Point", deposition_id=1, tilt_series_pixel_size=2.0)
     make_run(dataset, "r2", points_vox=[[1.0, 2.0, 3.0]], shape="Point", deposition_id=1, tilt_series_pixel_size=3.0)
-    with pytest.raises(ValueError, match="tilt-series pixel sizes"):
-        export_portal_picks(dataset_dir=dataset, out_dir=tmp_path / "out", object_name="cytosolic ribosome", deposition_id=1,
-                            shape="point", layout="relion5", runs=None, session_id="job001")
+    manifest = export_portal_picks(dataset_dir=dataset, out_dir=tmp_path / "out", object_name="cytosolic ribosome", deposition_id=1,
+                                   shape="point", layout="relion5", runs=None, session_id="job001")
+    assert manifest["tilt_series_pixel_size_a"] is None
+    assert any("one optics group per run" in note for note in manifest["notes"])
+    blocks = starfile.read(tmp_path / "out" / "particles.star", always_dict=True)
+    optics = blocks["optics"].set_index("rlnOpticsGroupName")
+    assert optics.loc["r1", "rlnTomoTiltSeriesPixelSize"] == 2.0 and optics.loc["r2", "rlnTomoTiltSeriesPixelSize"] == 3.0
+    groups = dict(zip(optics.index, optics["rlnOpticsGroup"]))
+    particles = blocks["particles"]
+    assert [groups[name] for name in particles["rlnTomoName"]] == list(particles["rlnOpticsGroup"])
 
 
 # -- the project job ------------------------------------------------------------------

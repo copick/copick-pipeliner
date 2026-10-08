@@ -25,7 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # The environment the `copick-pipeliner-tools` CLI runs in (picking image / host venv).
-copick = ["copick>=1.26", "copick-utils>=1.8"]
+copick = ["copick>=1.30", "copick-utils>=1.8"]
 dev = ["pytest"]
 
 [project.scripts]
