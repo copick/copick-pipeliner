@@ -165,10 +165,11 @@ class CopickJobBase(PipelinerJob):
             choices=list(LAYOUTS),
             default_value=DEFAULT_LAYOUT,
             help_text=(
-                "import_centered: rlnCoordinateX/Y/Z hold CENTERED Angstrom coordinates for "
-                "relion.importtomo.coordinates with is_center=Yes, scale_factor=1. "
-                "relion5: rlnCenteredCoordinate{X,Y,Z}Angst columns for a direct "
-                "relion.pseudosubtomo in_particles binding."
+                "import_centered: the bundle relion.importtomo.coordinates reads in STAR mode, an index "
+                "particles.star (data_coordinate_files) naming one coordinates/<run>.star per run, each with "
+                "rlnCenteredCoordinate{X,Y,Z}Angst. relion5: one flat data_optics + data_particles file with "
+                "the same centered columns, for a direct relion.pseudosubtomo in_particles binding. Both are "
+                "written by copick's RELION export."
             ),
         )
 

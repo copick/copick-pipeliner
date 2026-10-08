@@ -1,4 +1,4 @@
-"""The five job types resolve through pipeliner's registry and produce sane commands."""
+"""The eight job types resolve through pipeliner's registry and produce sane commands."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from pipeliner.nodes import NODE_PARAMSDATA, NODE_PARTICLEGROUPMETADATA, NODE_PR
 
 from copick_pipeliner.jobs._common import PICKS_MANIFEST, PARTICLES_NODE, session_id_for
 
-JOB_TYPES = ("copick.project", "copick.portalpicks", "copick.easymode", "copick.boundary", "copick.membrain")
+JOB_TYPES = ("copick.project", "copick.portalpicks", "copick.easymode", "copick.boundary", "copick.membrain",
+             "copick.segment.easymode", "copick.filaments.trace", "copick.filaments.picks")
 UNSAFE = set(";|&$`><\n")
 
 
@@ -32,13 +33,13 @@ def test_default_parameters_dict_is_introspectable(job_type):
     assert params["_rlnJobTypeLabel"] == job_type
 
 
-def test_registry_lists_all_five():
+def test_registry_lists_all_eight():
     names = {job.PROCESS_NAME for job in get_job_types("copick.")}
     assert set(JOB_TYPES) <= names
 
 
 def test_picking_jobs_register_star_and_manifest_nodes():
-    for job_type in ("copick.portalpicks", "copick.easymode", "copick.boundary"):
+    for job_type in ("copick.portalpicks", "copick.easymode", "copick.boundary", "copick.filaments.picks"):
         job = new_job_of_type(job_type)
         job.output_dir = "AutoPick/job004/"
         job.create_output_nodes()
@@ -156,3 +157,98 @@ def test_membrain_command(fake_executables):
     argv = _argv(job)
     assert argv[argv.index("--membrain-voxel-size") + 1] == "10.0"
     assert argv[argv.index("--session-id") + 1] == "job007"
+
+
+def test_the_filament_chain_binds_by_registered_node_types():
+    """segment -> trace -> picks -> boundary, each input matching the upstream job's registered output node."""
+    def outputs(job_type, out_dir):
+        job = new_job_of_type(job_type)
+        job.output_dir = out_dir
+        job.create_output_nodes()
+        return {n.name.split("/")[-1]: n for n in job.output_nodes}
+
+    segment = outputs("copick.segment.easymode", "Segment/job009/")
+    assert segment["segmentations.json"].type == "ProcessData.json.copick.manifest.segmentation.easymode"
+    trace = outputs("copick.filaments.trace", "Filaments/job010/")
+    assert trace["filaments.json"].type == "ProcessData.json.copick.manifest.filaments.trace"
+    picks = outputs("copick.filaments.picks", "AutoPick/job011/")
+    assert picks[PARTICLES_NODE].type == "ParticleGroupMetadata.star.copick.picks.filaments"
+    assert picks[PICKS_MANIFEST].type == "ProcessData.json.copick.manifest.picks.filaments"
+
+    trace_in = new_job_of_type("copick.filaments.trace").joboptions["in_segmentation"]
+    assert trace_in.node_type == NODE_PROCESSDATA and trace_in.node_kwds == ["copick", "manifest", "segmentation"]
+    assert set(trace_in.node_kwds) <= set(segment["segmentations.json"].kwds)
+    picks_in = new_job_of_type("copick.filaments.picks").joboptions["in_filaments"]
+    assert picks_in.node_type == NODE_PROCESSDATA and set(picks_in.node_kwds) <= set(trace["filaments.json"].kwds)
+    boundary_in = new_job_of_type("copick.boundary").joboptions["in_picks"]
+    assert boundary_in.node_type == NODE_PARTICLEGROUPMETADATA == picks[PARTICLES_NODE].toplevel_type
+
+
+def test_segment_command(fake_executables):
+    job = new_job_of_type("copick.segment.easymode")
+    job.output_dir = "Segment/job009/"
+    job.joboptions["copick_config"].value = "Copick/job003/copick_config.json"
+    job.joboptions["voxel_size"].value = 10.005
+    argv = _argv(job)
+    assert argv[1] == "segment-easymode" and argv[argv.index("--session-id") + 1] == "job009"
+    assert argv[argv.index("--models") + 1] == "microtubule" and argv[argv.index("--voxel-size") + 1] == "10.005"
+    assert "--reuse-segmentation-session" not in argv and "--layout" not in argv   # segmentation only: no STAR
+    job.joboptions["reuse_segmentation_session"].value = "job006"
+    assert _argv(job)[_argv(job).index("--reuse-segmentation-session") + 1] == "job006"
+    job.joboptions["reuse_segmentation_session"].value = "../job006"
+    assert job.additional_joboption_validation()
+
+
+def test_trace_command_passes_only_the_options_that_were_set(fake_executables):
+    job = new_job_of_type("copick.filaments.trace")
+    job.output_dir = "Filaments/job010/"
+    job.joboptions["copick_config"].value = "Copick/job003/copick_config.json"
+    job.joboptions["in_segmentation"].value = "Segment/job009/segmentations.json"
+    argv = _argv(job)
+    assert argv[1] == "trace-filaments"
+    assert argv[argv.index("--in-segmentation") + 1] == "Segment/job009/segmentations.json"
+    for flag in ("--min-length", "--min-aspect", "--max-bend", "--smoothing", "--label", "--object"):
+        assert flag not in argv                                   # unset: copick-utils' own default
+    assert "--extend-ends" in argv and argv[argv.index("--curve") + 1] == "catmull-rom"
+    job.joboptions["min_length_a"].value = 1000.0
+    job.joboptions["max_bend_deg"].value = 30.0
+    job.joboptions["extend_ends"].value = False
+    argv = _argv(job)
+    assert argv[argv.index("--min-length") + 1] == "1000.0" and argv[argv.index("--max-bend") + 1] == "30.0"
+    assert "--no-extend-ends" in argv
+    assert job.jobinfo.programs[0].name == "copick-pipeliner-tools"
+
+
+def test_picks_command_requires_a_spacing_and_seeds_only_a_random_roll(fake_executables):
+    job = new_job_of_type("copick.filaments.picks")
+    job.output_dir = "AutoPick/job011/"
+    job.joboptions["copick_config"].value = "Copick/job003/copick_config.json"
+    job.joboptions["in_filaments"].value = "Filaments/job010/filaments.json"
+    assert job.joboptions["spacing_a"].is_required and job.joboptions["spacing_a"].value is None
+    with pytest.raises(ValueError, match="required but has no value"):   # no default spacing, as in copick-utils
+        job.get_commands()
+    job.joboptions["spacing_a"].value = 82.0
+    job.joboptions["seed"].value = 3
+    argv = _argv(job)
+    assert argv[1] == "filament-picks" and argv[argv.index("--spacing") + 1] == "82.0"
+    assert argv[argv.index("--anchor") + 1] == "center" and argv[argv.index("--roll") + 1] == "parallel"
+    assert "--seed" not in argv and argv[argv.index("--layout") + 1] == "import_centered"
+    job.joboptions["roll"].value = "random"
+    assert _argv(job)[_argv(job).index("--seed") + 1] == "3"
+
+
+def test_job_definitions_load_without_copick(tmp_path):
+    """The pipeliner control process (ApexAgent's venv) loads every job class; copick lives in the tools image."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; sys.modules['copick'] = None\n"
+        "import importlib\n"
+        "for m in ('project', 'portalpicks', 'easymode', 'boundary', 'membrain', 'segment', 'filaments'):\n"
+        "    importlib.import_module('copick_pipeliner.jobs.' + m)\n"
+        "from pipeliner.job_factory import new_job_of_type\n"
+        "for t in ('copick.segment.easymode', 'copick.filaments.trace', 'copick.filaments.picks'):\n"
+        "    new_job_of_type(t)\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=tmp_path)

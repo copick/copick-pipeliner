@@ -38,6 +38,7 @@ def recovery(tmp_path, monkeypatch):
         spacing = SimpleNamespace(get_tomogram=lambda t, obj=tomo: obj if t == 'wbp' else None)
         runs[name] = SimpleNamespace(get_segmentations=getsegs, get_voxel_spacing=lambda v, obj=spacing: obj if v == 8.66 else None)
         stores[name] = seg_path
+    import copick.util.escape  # noqa: F401 - the real name sanitizer stays importable under the fake root below
     monkeypatch.setitem(sys.modules, 'copick', SimpleNamespace(from_file=lambda p: SimpleNamespace(get_run=runs.get)))
     class Group:
         def __init__(self, path):

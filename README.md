@@ -13,6 +13,9 @@ like any RELION job.
 | `copick.easymode` | copick-easymode segmentation → Octopi radius-aware localization → `particles.star` | GPU (TensorFlow) |
 | `copick.boundary` | octopi `tomogram-boundary` (specimen vs vacuum) → keep picks inside the specimen → `particles.star` | GPU (torch) |
 | `copick.membrain` | MemBrain-seg membranes via copick-torch → `segmentations.json` | GPU (torch) |
+| `copick.segment.easymode` | copick-easymode segmentation only (sharded like `copick.easymode`) → `segmentations.json` | GPU (TensorFlow) |
+| `copick.filaments.trace` | copick-utils `seg2fil` on that segmentation → Filaments + instance segmentation → `filaments.json` | CPU |
+| `copick.filaments.picks` | copick-utils `fil2picks` at a stated spacing → `particles.star` with RELION's filament columns | CPU |
 
 ## Two halves, two environments
 
@@ -30,22 +33,52 @@ like any RELION job.
 
 ## Conventions
 
-* **Coordinates** (`tools/coords.py`): copick positions are Ångström, corner origin. RELION
-  centered coordinates are `pos_A − dims_px·voxel/2` of the *tomogram actually picked*; Euler
-  angles are `Rotation.from_matrix(m).inv().as_euler("ZYZ", degrees=True)` (the py2rely and
-  zarr-particle-tools convention, validated by them against RELION 5). Two STAR layouts:
-  `import_centered` (centered Å in `rlnCoordinateX/Y/Z`, for `relion.importtomo.coordinates`
-  with `is_center=Yes`, `scale_factor=1`) and `relion5` (`rlnCenteredCoordinate*Angst`, for a
-  direct `relion.pseudosubtomo` binding). Uncentered tomogram pixels are never written.
+* **STAR files are copick's.** This package never writes a STAR file itself: stored picks go through
+  `copick.ops.export.export_relion_particles`, portal annotations read as arrays through
+  `copick.util.formats.build_relion_star_tables` and its writers. copick is the one implementation of
+  the RELION conventions: the particle position is `location + translation`, centered coordinates are
+  relative to the *tomogram actually picked* (`pos_A − dims_px·voxel/2`, the py2rely and
+  zarr-particle-tools convention), Euler angles are `Rotation.from_matrix(m).inv().as_euler("ZYZ")`,
+  and filament picks carry the filament frame, tube IDs, track lengths and per-filament polarity.
+  Two layouts, both with `rlnCenteredCoordinate*Angst` only (uncentered pixels are never written):
+  `import_centered`, the bundle `relion.importtomo.coordinates` reads (an index `particles.star`,
+  `data_coordinate_files`, naming one `coordinates/<run>.star` per run, all with the same columns), and
+  `relion5`, one flat `data_particles` (+ `data_optics`, one group per run, when every run's tilt-series
+  pixel size is known) for a direct `relion.pseudosubtomo` binding. `tests/test_coords.py` pins
+  copick's output to those conventions.
 * **Attempt identity**: the copick `session_id` of everything a job writes is its pipeliner job
   number (`job012`), so a rerun never overwrites an earlier attempt; downstream jobs read the
   exact URI from the upstream `picks_manifest.json`, never a default.
 * **Outputs are products**: `particles.star` + `picks_manifest.json` (or `segmentations.json`)
   are registered nodes; no job re-emits its input config. The manifest carries source
   provenance (annotation/deposition ids, tomogram id), per-run geometry (dims, voxel size,
-  origin), counts, URIs, and whether orientations are measured or an identity initialisation.
-* **Objects** are registered once by `copick.project`; every later command runs with
-  `--no-add-objects`.
+  origin), counts, URIs, and whether orientations are measured, an identity initialization or the
+  filament frame (`orientations`: `measured`, `identity_initialisation`, `filament_frame`).
+* **Objects** are registered once by `copick.project` (`name:radiusA`, radius 0 = segmentation-only);
+  every later command runs with `--no-add-objects`. `name:radiusA:filament[:polar|:apolar]` declares a
+  filament the way copick stores it (`metadata.copick.filament`, copick's `FilamentSpec`), with the tube
+  radius, e.g. `microtubule:120:filament:polar`.
+
+## Filaments
+
+`copick.segment.easymode` → `copick.filaments.trace` → `copick.filaments.picks` → `copick.boundary`, each
+binding the previous job's registered output node (`ProcessData` `copick.manifest.segmentation`, then
+`copick.manifest.filaments`, then the picks' `ParticleGroupMetadata`).
+
+* The segmentation job records, per run and model, the segmentation URI and its array metadata checked
+  against the tomogram (no voxel read), the weights resolved and the inference settings, and says
+  `complete` only after every array verified. `reuse_segmentation_session` records a prior job's
+  verified session (a `copick.easymode` or `copick.segment.easymode` job, found by job number in any job
+  directory) instead of running inference.
+* The trace refuses a segmentation manifest that is not complete, of another project, or missing a run,
+  and an object the project does not declare a filament. Options mirror `seg2fil`; an empty one keeps
+  copick-utils' own default. The Filaments and the instance segmentation (same IDs) are stored under
+  `<object>:trace/<job>`; `filaments.json` has per-run filament IDs, lengths and polarity counts.
+* The picks job requires `spacing_a` (no default, as in copick-utils). Its export writes RELION's
+  filament columns with `rlnAnglePsiFlipRatio` per filament from the trace's Filaments (0 where the
+  polarity is known, 0.5 elsewhere); a pick whose filament is not in them fails the job as a lineage
+  error. `copick.boundary` keeps filament IDs, order and frames (`picksin`) and exports the same way,
+  with polarity from the Filaments its upstream manifest names.
 
 ## Portal-backed projects (no mirror)
 

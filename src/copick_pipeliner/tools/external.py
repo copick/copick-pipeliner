@@ -113,6 +113,88 @@ def picksin_argv(
     return argv  # VERIFY-P2
 
 
+#: ``copick convert seg2fil``'s numeric options in Angstrom (``--length-unit angstrom``) or cubic Angstrom
+#: (``--volume-unit angstrom``), keyed by the name the pipeliner passes them under. Read from copick-utils 1.10.0
+#: ``cli/seg2fil.py``; an option left out keeps copick-utils' own default (or its derivation from the segmentation).
+SEG2FIL_OPTIONS = {
+    "min_length": "--min-length",
+    "min_aspect": "--min-aspect",
+    "min_radius": "--min-radius",
+    "fill_lumen": "--fill-lumen",
+    "min_volume": "--min-volume",
+    "prune_length": "--prune-length",
+    "junction_merge": "--junction-merge",
+    "max_bend": "--max-bend",
+    "smoothing": "--smoothing",
+}
+SEG2FIL_CURVES = ("catmull-rom", "bspline")
+
+
+def seg2fil_argv(
+    *, config: str, seg_uri_in: str, filaments_uri: str, instances_uri: str | None, runs: list[str] | None,
+    options: dict | None = None, extend_ends: bool | None = None, curve: str | None = None, label: int | None = None,
+    workers: int | None = None,
+) -> list[str]:
+    """``copick convert seg2fil``: trace filaments in a segmentation into a Filaments entry (+ instance segmentation).
+
+    Lengths are always given in Angstrom and volumes in cubic Angstrom (the units are stated, never left to a default).
+    ``options`` maps ``SEG2FIL_OPTIONS`` names to numbers; None or absent means "copick-utils' default"."""
+    check_safe(config, seg_uri_in, filaments_uri, instances_uri or "", *(runs or []))
+    argv = [settings.copick_exe(), "convert", "seg2fil", "-c", config, "-i", seg_uri_in, "-o", filaments_uri,
+            "--length-unit", "angstrom", "--volume-unit", "angstrom"]
+    if instances_uri:
+        argv += ["--instances", instances_uri]
+    for name, value in (options or {}).items():
+        if name not in SEG2FIL_OPTIONS:
+            raise ValueError(f"unknown seg2fil option {name!r}; known: {sorted(SEG2FIL_OPTIONS)}")
+        if value is not None:
+            argv += [SEG2FIL_OPTIONS[name], f"{float(value):g}"]
+    if extend_ends is not None:
+        argv += ["--extend-ends" if extend_ends else "--no-extend-ends"]
+    if curve:
+        if curve not in SEG2FIL_CURVES:
+            raise ValueError(f"unknown curve {curve!r}; choose one of {SEG2FIL_CURVES}")
+        argv += ["--curve", curve]
+    if label is not None:
+        argv += ["--label", str(int(label))]
+    if workers:
+        argv += ["-w", str(int(workers))]
+    argv += run_names_args(runs)
+    return argv  # source: copick-utils 1.10.0 cli/seg2fil.py
+
+
+FIL2PICKS_ANCHORS = ("center", "start")
+FIL2PICKS_ROLLS = ("parallel", "random")
+
+
+def fil2picks_argv(
+    *, config: str, filaments_uri: str, picks_uri: str, spacing_a: float, anchor: str | None = None,
+    roll: str | None = None, seed: int | None = None, runs: list[str] | None = None, workers: int | None = None,
+) -> list[str]:
+    """``copick convert fil2picks``: picks every ``spacing_a`` Angstrom along each filament (IDs = filament IDs, +Z =
+    the tangent in point order). The spacing has no default here either: copick-utils requires it, and so does this."""
+    check_safe(config, filaments_uri, picks_uri, *(runs or []))
+    spacing = float(spacing_a)
+    if not spacing > 0:
+        raise ValueError(f"spacing must be > 0 Angstrom, got {spacing_a!r}")
+    argv = [settings.copick_exe(), "convert", "fil2picks", "-c", config, "-i", filaments_uri, "-o", picks_uri,
+            "--spacing", f"{spacing:g}", "--length-unit", "angstrom"]
+    if anchor:
+        if anchor not in FIL2PICKS_ANCHORS:
+            raise ValueError(f"unknown anchor {anchor!r}; choose one of {FIL2PICKS_ANCHORS}")
+        argv += ["--anchor", anchor]
+    if roll:
+        if roll not in FIL2PICKS_ROLLS:
+            raise ValueError(f"unknown roll {roll!r}; choose one of {FIL2PICKS_ROLLS}")
+        argv += ["--roll", roll]
+    if seed is not None:
+        argv += ["--seed", str(int(seed))]
+    if workers:
+        argv += ["-w", str(int(workers))]
+    argv += run_names_args(runs)
+    return argv  # source: copick-utils 1.10.0 cli/fil2picks.py
+
+
 # ---- copick-torch (MemBrain-seg) --------------------------------------------------------
 
 def membrain_argv(
