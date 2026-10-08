@@ -56,7 +56,7 @@ runs = argv[argv.index("-r") + 1].split(",")
 errors = spec["errors"]
 if spec["report"]:
     json.dump({{
-        "tool": "copick-easymode", "version": "0.4.0", "status": spec["status"], "devices": ["0", "1"], "threads_per_worker": 4,
+        "tool": "copick-easymode", "version": "0.4.0", "easymode_version": "1.2.5", "status": spec["status"], "devices": ["0", "1"], "threads_per_worker": 4,
         "model_directory": "/models/easymode", "online": False, "writable": True, "missing": spec["missing"],
         "models": [{{"feature": "ribosome", "tag": "v1", "timestamp": "2026-01-01", "weights": "/models/easymode/ribosome.h5", "bytes": 1, "kind": "3d"}}],
         "workers": [{{"index": i, "gpu": gpu, "runs": runs[i::2], "exitcode": 1 if (errors and i == 1) else 0, "seconds": 1.0,
@@ -136,7 +136,7 @@ def test_a_complete_run_records_the_invocation_and_the_report_beside_it(tmp_path
     assert invocation["returncode"] == 0 and invocation["reported_errors"] == 0 and invocation["runs"] == ["run_a", "run_b", "run_c"]
     assert manifest["n_workers"] == 2 and manifest["devices"] == ["0", "1"] and [w["runs"] for w in manifest["gpu_workers"]] == [["run_a", "run_c"], ["run_b"]]
     assert manifest["models_fetch"]["models"][0]["tag"] == "v1" and manifest["models_fetch"]["model_directory"] == "/models/easymode"
-    assert manifest["easymode_version"] == "0.4.0" and manifest["models"] == ["atp-synthase"] and manifest["features"] == ["atp_synthase"]
+    assert manifest["copick_easymode_version"] == "0.4.0" and manifest["easymode_version"] == "1.2.5" and manifest["models"] == ["atp-synthase"] and manifest["features"] == ["atp_synthase"]
     report = json.loads(Path(manifest["easymode_report"]).read_text())
     assert report["seen_manifest_status"] == "running"                                    # the manifest exists while inference runs
 

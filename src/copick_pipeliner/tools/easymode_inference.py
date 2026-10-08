@@ -147,7 +147,8 @@ def run_inference(
         "gpus_requested": gpus or None, "max_workers": max_workers, "threads": threads, "model_directory": model_dir,
         "allocation_visible_devices": os.environ.get(ENV_VISIBLE), "workers": [invocation] if todo else [],
         "n_workers": None, "devices": None, "threads_per_worker": None, "gpu_workers": None, "models_fetch": None,
-        "easymode_report": str(report_path) if todo else None, "easymode_version": None, "dry_run": dry_run, "status": "planned",
+        "easymode_report": str(report_path) if todo else None, "copick_easymode_version": None, "easymode_version": None,
+        "dry_run": dry_run, "status": "planned",
     }
     print(f"easymode inference: {len(requested)} run(s) requested, {len(done_before)} already segmented in session {session_id}, "
           f"{len(todo)} to do on " + (f"GPU(s) {gpus or 'all of the allocation'}" if use_gpu else "the CPU"), flush=True)
@@ -178,7 +179,8 @@ def run_inference(
         gpu_workers = report.get("workers") or []
         failed_gpu = [w for w in gpu_workers if _worker_failed(w)]
         invocation.update(reported_errors=len(errors), error_lines=[e[:300] for e in errors[:50]])
-        manifest.update(easymode_version=report.get("version"), easymode_status=report.get("status"), gpu_workers=gpu_workers,
+        manifest.update(copick_easymode_version=report.get("version"), easymode_version=report.get("easymode_version"),
+                        easymode_status=report.get("status"), gpu_workers=gpu_workers,
                         n_workers=len(gpu_workers), devices=report.get("devices"), threads_per_worker=report.get("threads_per_worker"),
                         models_fetch=models_fetch(report))
     done_after = complete_runs(config, requested, objects, user_id=user_id, session_id=session_id, voxel_a=voxel_a)
@@ -190,7 +192,8 @@ def run_inference(
     elif returncode != 0:
         why.append(f"copick inference easymode exited {returncode}")
     if report is None:
-        why.append(f"it wrote no report at {report_path} (copick-easymode >= {MIN_COPICK_EASYMODE} writes one; an older version refuses --report)")
+        why.append(f"it wrote no report at {report_path} (copick-easymode >= {MIN_COPICK_EASYMODE} writes one on every exit but a "
+                   "usage error; an older version refuses --report)")
     elif report.get("status") != "complete":
         why.append(f"its report says status {report.get('status')!r}")
     if failed_gpu:
