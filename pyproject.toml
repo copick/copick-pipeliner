@@ -25,7 +25,13 @@ dependencies = [
 
 [project.optional-dependencies]
 # The environment the `copick-pipeliner-tools` CLI runs in (picking image / host venv).
-copick = ["copick>=1.30", "copick-utils>=1.10"]
+copick = [
+    # TODO:remove before release -- build against the unreleased copick RELION export (per-filament polarity, the
+    # import-coordinates layout, export_relion_particles) on copick's uermel/filament-polarity-export branch;
+    # restore "copick>=1.30" when copick publishes it.
+    "copick @ git+https://github.com/copick/copick@uermel/filament-polarity-export",
+    "copick-utils>=1.10",
+]
 dev = ["pytest"]
 
 [project.scripts]
@@ -40,6 +46,10 @@ copick-pipeliner-tools = "copick_pipeliner.tools.cli:main"
 "copick.segment.easymode" = "copick_pipeliner.jobs.segment:CopickSegmentEasymodeJob"
 "copick.filaments.trace" = "copick_pipeliner.jobs.filaments:CopickFilamentsTraceJob"
 "copick.filaments.picks" = "copick_pipeliner.jobs.filaments:CopickFilamentsPicksJob"
+
+[tool.hatch.metadata]
+# TODO:remove before release, with the direct copick reference above.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/copick_pipeliner"]
