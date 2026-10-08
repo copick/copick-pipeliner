@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "copick-pipeliner"
 version = "0.1.15"
-description = "ccpem-pipeliner job types for copick-based particle picking on cryo-ET tomograms (copick-easymode, octopi boundary cleanup, MemBrain-seg, portal picks) and their export to RELION 5 particle STAR files."
+description = "ccpem-pipeliner job types for copick-based particle picking on cryo-ET tomograms (copick-easymode, octopi boundary cleanup, MemBrain-seg, portal picks, filament tracing) and their export to RELION 5 particle STAR files through copick's export."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -25,7 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # The environment the `copick-pipeliner-tools` CLI runs in (picking image / host venv).
-copick = ["copick>=1.30", "copick-utils>=1.8"]
+copick = ["copick>=1.30", "copick-utils>=1.10"]
 dev = ["pytest"]
 
 [project.scripts]
@@ -37,6 +37,9 @@ copick-pipeliner-tools = "copick_pipeliner.tools.cli:main"
 "copick.easymode" = "copick_pipeliner.jobs.easymode:CopickEasymodeJob"
 "copick.boundary" = "copick_pipeliner.jobs.boundary:CopickBoundaryJob"
 "copick.membrain" = "copick_pipeliner.jobs.membrain:CopickMembrainJob"
+"copick.segment.easymode" = "copick_pipeliner.jobs.segment:CopickSegmentEasymodeJob"
+"copick.filaments.trace" = "copick_pipeliner.jobs.filaments:CopickFilamentsTraceJob"
+"copick.filaments.picks" = "copick_pipeliner.jobs.filaments:CopickFilamentsPicksJob"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/copick_pipeliner"]
