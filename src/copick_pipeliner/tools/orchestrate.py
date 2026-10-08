@@ -139,12 +139,13 @@ def read_project_manifest(config_path: Path) -> dict:
     return read_manifest(Path(config_path).parent / PROJECT_MANIFEST)
 
 
-def _project_tilt_pixel_size(config_path: Path) -> float | None:
-    """The tilt-series sampling the project job recorded, if it had a source for it."""
+def _project_tilt_pixel_sizes(config_path: Path) -> dict[str, float | None]:
+    """Per run, the tilt-series sampling the project job recorded (None where it had no source for it)."""
     try:
-        return read_project_manifest(config_path).get("tilt_series_pixel_size_a")
+        runs = read_project_manifest(config_path).get("runs") or {}
     except (FileNotFoundError, ValueError):
-        return None
+        return {}
+    return {name: (info or {}).get("tilt_series_pixel_size_a") for name, info in runs.items()}
 
 
 def resolve_runs(runs: str | list[str] | None) -> list[str] | None:
@@ -946,7 +947,7 @@ def easymode(
     return export_copick_picks(
         config=config, out_dir=out_dir, picks_uri=external.seg_uri(primary, picks_user, session_id), tomo_type=tomo_type,
         voxel_a=voxel_a, layout=layout, runs=runs, session_id=session_id, job_type="copick.easymode",
-        orientations="identity_initialisation", tilt_series_pixel_size_a=_project_tilt_pixel_size(config),
+        tilt_series_pixel_size_a=_project_tilt_pixel_sizes(config),
         source={"kind": "copick-segmentation", "tool": "copick-easymode", "models": models, "objects": objects,
                 "models_fetch": shards.get("models_fetch"),
                 "segmentations": [external.seg_uri(m, user, source_session, voxel_a) for m in objects],
@@ -1006,11 +1007,20 @@ def boundary(
                                      runs=runs, workers=threads))
     if runner.dry_run:
         return {"dry_run": True, "picks_uri": out_uri, "input_picks_uri": picks_uri}
+    # Filament picks stay filament picks: picksin keeps IDs, order and transforms (copick-utils >= 1.9), and the export
+    # resolves polarity from the same Filaments the upstream export did (its lineage, not this URI's).
+    filaments_uri = (upstream.get("filaments") or {}).get("filaments_uri")
+    if upstream.get("orientations") == "filament_frame" and not filaments_uri:
+        raise ValueError(f"{sibling_manifest(in_picks)} describes filament picks but names no Filaments; cannot keep their polarity")
+    tilt = _project_tilt_pixel_sizes(config)
+    tilt.update({run: info["tilt_series_pixel_size_a"] for run, info in (upstream.get("runs") or {}).items()
+                 if info.get("tilt_series_pixel_size_a") is not None})
     manifest = export_copick_picks(
         config=config, out_dir=out_dir, picks_uri=out_uri, tomo_type=tomo_type, voxel_a=voxel_a, layout=layout,
-        runs=runs, session_id=session_id, job_type="copick.boundary", orientations=upstream.get("orientations", "identity_initialisation"),
-        tilt_series_pixel_size_a=upstream.get("tilt_series_pixel_size_a") or _project_tilt_pixel_size(config),
+        runs=runs, session_id=session_id, job_type="copick.boundary", tilt_series_pixel_size_a=tilt,
+        filaments_uri=filaments_uri,
         source={"kind": "copick-picks-filtered", "input_picks_uri": picks_uri, "input_manifest": str(sibling_manifest(in_picks)),
+                "input_orientations": upstream.get("orientations"),
                 "boundary_model": model, "boundary_voxel_size_a": boundary_voxel_a, "sample_segmentation": sample_uri,
                 "voxel_size_requested_a": requested_voxel_a, "voxel_size_used_a": voxel_a, "boundary_recovery": boundary_recovery},
     )

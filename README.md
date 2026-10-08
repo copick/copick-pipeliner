@@ -30,20 +30,27 @@ like any RELION job.
 
 ## Conventions
 
-* **Coordinates** (`tools/coords.py`): copick positions are Ångström, corner origin. RELION
-  centered coordinates are `pos_A − dims_px·voxel/2` of the *tomogram actually picked*; Euler
-  angles are `Rotation.from_matrix(m).inv().as_euler("ZYZ", degrees=True)` (the py2rely and
-  zarr-particle-tools convention, validated by them against RELION 5). Two STAR layouts:
-  `import_centered` (centered Å in `rlnCoordinateX/Y/Z`, for `relion.importtomo.coordinates`
-  with `is_center=Yes`, `scale_factor=1`) and `relion5` (`rlnCenteredCoordinate*Angst`, for a
-  direct `relion.pseudosubtomo` binding). Uncentered tomogram pixels are never written.
+* **STAR files are copick's.** This package never writes a STAR file itself: stored picks go through
+  `copick.ops.export.export_relion_particles`, portal annotations read as arrays through
+  `copick.util.formats.build_relion_star_tables` and its writers. copick is the one implementation of
+  the RELION conventions: the particle position is `location + translation`, centered coordinates are
+  relative to the *tomogram actually picked* (`pos_A − dims_px·voxel/2`, the py2rely and
+  zarr-particle-tools convention), Euler angles are `Rotation.from_matrix(m).inv().as_euler("ZYZ")`,
+  and filament picks carry the filament frame, tube IDs, track lengths and per-filament polarity.
+  Two layouts, both with `rlnCenteredCoordinate*Angst` only (uncentered pixels are never written):
+  `import_centered`, the bundle `relion.importtomo.coordinates` reads (an index `particles.star`,
+  `data_coordinate_files`, naming one `coordinates/<run>.star` per run, all with the same columns), and
+  `relion5`, one flat `data_particles` (+ `data_optics`, one group per run, when every run's tilt-series
+  pixel size is known) for a direct `relion.pseudosubtomo` binding. `tests/test_coords.py` pins
+  copick's output to those conventions.
 * **Attempt identity**: the copick `session_id` of everything a job writes is its pipeliner job
   number (`job012`), so a rerun never overwrites an earlier attempt; downstream jobs read the
   exact URI from the upstream `picks_manifest.json`, never a default.
 * **Outputs are products**: `particles.star` + `picks_manifest.json` (or `segmentations.json`)
   are registered nodes; no job re-emits its input config. The manifest carries source
   provenance (annotation/deposition ids, tomogram id), per-run geometry (dims, voxel size,
-  origin), counts, URIs, and whether orientations are measured or an identity initialisation.
+  origin), counts, URIs, and whether orientations are measured, an identity initialization or the
+  filament frame (`orientations`: `measured`, `identity_initialisation`, `filament_frame`).
 * **Objects** are registered once by `copick.project`; every later command runs with
   `--no-add-objects`.
 

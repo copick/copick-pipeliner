@@ -179,14 +179,16 @@ def membrain(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
 @click.option("--tomo-type", default="wbp", help="copick tomogram type; an empty value reads the type the project records.")
 @click.option("--voxel-size", type=float, required=True)
 @click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
-@click.option("--orientations", type=click.Choice(["measured", "identity_initialisation"]), default="identity_initialisation")
-def export_star(out_dir, session_id, threads, runs, dry_run, config, picks_uri, tomo_type, voxel_size, layout, orientations):
-    """Any copick pick set -> particles.star + picks_manifest.json."""
+@click.option("--filaments-uri", default=None, help="Filament picks: the Filaments (object:user/session) they were sampled from; "
+              "writes RELION's filament columns with each filament's polarity.")
+def export_star(out_dir, session_id, threads, runs, dry_run, config, picks_uri, tomo_type, voxel_size, layout, filaments_uri):
+    """Any copick pick set -> particles.star + picks_manifest.json, written by copick's RELION export."""
     from .export_star import export_copick_picks
 
     manifest = export_copick_picks(
         config=Path(config), out_dir=Path(out_dir), picks_uri=picks_uri, tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type), voxel_a=voxel_size, layout=layout,
-        runs=_runs(runs), session_id=session_id, job_type="copick.export", orientations=orientations,
+        runs=_runs(runs), session_id=session_id, job_type="copick.export", filaments_uri=filaments_uri,
+        tilt_series_pixel_size_a=orchestrate._project_tilt_pixel_sizes(Path(config)),
     )
     click.echo(json.dumps(manifest["totals"]))
 

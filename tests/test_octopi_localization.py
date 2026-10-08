@@ -105,7 +105,7 @@ def test_octopi_keeps_its_native_merge_and_passes_memory_bound(config, monkeypat
     monkeypatch.setattr(contract, 'validate_report', lambda *a, **kw: {'status': 'complete'})
     monkeypatch.setattr(orchestrate.dedupe, 'merge_project_picks', lambda *a, **kw: pytest.fail('legacy merge changed Octopi picks'))
     monkeypatch.setattr(orchestrate, 'export_copick_picks', lambda **kw: kw)
-    monkeypatch.setattr(orchestrate, '_project_tilt_pixel_size', lambda c: 2.5)
+    monkeypatch.setattr(orchestrate, '_project_tilt_pixel_sizes', lambda c: {'one': 2.5})
     class Recorder:
         dry_run = False
         def __init__(self): self.log = []
