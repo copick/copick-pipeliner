@@ -51,8 +51,10 @@ like any RELION job.
   provenance (annotation/deposition ids, tomogram id), per-run geometry (dims, voxel size,
   origin), counts, URIs, and whether orientations are measured, an identity initialization or the
   filament frame (`orientations`: `measured`, `identity_initialisation`, `filament_frame`).
-* **Objects** are registered once by `copick.project`; every later command runs with
-  `--no-add-objects`.
+* **Objects** are registered once by `copick.project` (`name:radiusA`, radius 0 = segmentation-only);
+  every later command runs with `--no-add-objects`. `name:radiusA:filament[:polar|:apolar]` declares a
+  filament the way copick stores it (`metadata.copick.filament`, copick's `FilamentSpec`), with the tube
+  radius, e.g. `microtubule:120:filament:polar`.
 
 ## Portal-backed projects (no mirror)
 

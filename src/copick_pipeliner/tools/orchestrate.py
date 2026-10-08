@@ -34,24 +34,50 @@ DEFAULT_COLORS = [
 ]
 
 
+#: The polarity words of a filament object spec, as copick's ``FilamentSpec.polar``.
+FILAMENT_POLARITY = {"polar": True, "apolar": False}
+
+
 def parse_objects(spec: str) -> list[dict]:
-    """``"ribosome:150,membrane:0"`` -> copick ``pickable_objects`` entries (label = position+1)."""
+    """``"ribosome:150,membrane:0"`` -> copick ``pickable_objects`` entries (label = position+1).
+
+    An item is ``name:radiusA`` or ``name:radiusA:filament[:polar|:apolar]``. The filament form declares the object a
+    filament the way copick stores it (``metadata["copick"]["filament"]``, serialized by copick's own ``FilamentSpec``):
+    ``polar``/``apolar`` state whether the structure has a polarity (microtubules and actin are polar), and leaving
+    it out leaves it unstated. A filament is a particle object, so its radius (the tube radius) must be positive.
+    """
     objects: list[dict] = []
     for i, item in enumerate(part.strip() for part in spec.split(",") if part.strip()):
-        name, _, radius = item.partition(":")
+        name, _, rest = item.partition(":")
+        radius, _, kind = rest.partition(":")
         radius_a = float(radius) if radius else 0.0
-        objects.append(
-            {
-                "name": name.strip(),
-                "is_particle": radius_a > 0,
-                "label": i + 1,
-                "color": list(DEFAULT_COLORS[i % len(DEFAULT_COLORS)]),
-                "radius": radius_a if radius_a > 0 else None,
-            }
-        )
+        entry = {
+            "name": name.strip(),
+            "is_particle": radius_a > 0,
+            "label": i + 1,
+            "color": list(DEFAULT_COLORS[i % len(DEFAULT_COLORS)]),
+            "radius": radius_a if radius_a > 0 else None,
+        }
+        if kind:
+            entry["metadata"] = _filament_metadata(item, radius_a, kind)
+        objects.append(entry)
     if not objects:
         raise ValueError("no pickable objects given")
     return objects
+
+
+def _filament_metadata(item: str, radius_a: float, kind: str) -> dict:
+    """``filament`` or ``filament:polar|apolar`` -> the object metadata copick reads as a filament declaration."""
+    word, _, polarity = kind.partition(":")
+    if word.strip() != "filament" or (polarity and polarity.strip() not in FILAMENT_POLARITY) or polarity.count(":"):
+        raise ValueError(f"object {item!r}: expected name:radius or name:radius:filament[:polar|:apolar]")
+    if radius_a <= 0:
+        raise ValueError(f"object {item!r}: a filament is a particle object and needs its tube radius (> 0)")
+    from copick.models import COPICK_METADATA_NAMESPACE, FILAMENT_METADATA_KEY, FilamentSpec  # lazy: the copick extra
+
+    polar = FILAMENT_POLARITY.get(polarity.strip()) if polarity else None
+    spec = FilamentSpec(polar=polar)
+    return {COPICK_METADATA_NAMESPACE: {FILAMENT_METADATA_KEY: spec.model_dump(exclude_none=True)}}
 
 
 def write_copick_config(path: Path, *, name: str, overlay_root: Path, objects: list[dict], description: str = "") -> Path:

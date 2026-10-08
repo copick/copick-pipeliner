@@ -70,7 +70,7 @@ def portal_picks(out_dir, session_id, threads, runs, dry_run, config, dataset_di
 @click.option("--tomo-type", default="wbp")
 @click.option("--voxel-size", type=float, default=None)
 @click.option("--tomogram-id", default=None)
-@click.option("--objects", default="ribosome:150,membrane:0,sample:0,vacuum:0,boundary:0", help="name:radiusA list; radius 0 = segmentation-only object.")
+@click.option("--objects", default="ribosome:150,membrane:0,sample:0,vacuum:0,boundary:0", help="name:radiusA[:filament[:polar|:apolar]] list; radius 0 = segmentation-only object, :filament declares a filament.")
 @click.option("--overlay-root", type=click.Path(file_okay=False), default=None)
 @click.option("--link-volumes/--copy-volumes", default=True, help="Reference an existing OME-zarr in place (default) instead of converting it into the overlay.")
 @click.option("--selection", type=click.Path(exists=True, dir_okay=False), default=None, help="A resolved portal_selection.json: a portal-backed project whose tomograms stream from the portal.")

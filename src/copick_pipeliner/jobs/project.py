@@ -89,11 +89,13 @@ class CopickProjectJob(CopickJobBase):
         self.add_tomogram_options(voxel_required=False)
         self.add_runs_option()
         self.joboptions["objects"] = StringJobOption(
-            label="Pickable objects (name:radiusA, ...):",
+            label="Pickable objects (name:radiusA[:filament[:polar|:apolar]], ...):",
             default_value=DEFAULT_OBJECTS,
             help_text=(
                 "Objects registered once in the copick config; radius 0 marks a non-particle "
-                "(segmentation-only) object. Later jobs never add objects."
+                "(segmentation-only) object. name:radiusA:filament declares a filament (the radius is the "
+                "tube radius), with :polar or :apolar stating its polarity, e.g. microtubule:120:filament:polar. "
+                "Later jobs never add objects."
             ),
             is_required=True,
         )
