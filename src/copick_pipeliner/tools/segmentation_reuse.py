@@ -9,6 +9,7 @@ import re
 import numpy as np
 
 SESSION_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
+SHARD_MANIFEST = "easymode_shards.json"
 
 
 def validate_session(value: str) -> str:
@@ -16,6 +17,55 @@ def validate_session(value: str) -> str:
     if value and not SESSION_TOKEN.fullmatch(value):
         raise ValueError("reuse_segmentation_session must be a safe session token (letters, digits, underscore or hyphen)")
     return value
+
+
+def source_job_dir(out_dir: Path, source_session: str, marker: str = SHARD_MANIFEST) -> Path:
+    """The directory of the pipeliner job whose session is ``source_session`` (``job006``).
+
+    A sibling of ``out_dir`` first (same job type); else the one ``<project>/<Type>/<session>`` holding ``marker``:
+    job numbers are unique in a pipeliner project, and a segmentation job (``Segment/``) may reuse a picking job's
+    inference (``AutoPick/``). Zero or several candidates leave the sibling path, which then fails with its name."""
+    sibling = Path(out_dir).resolve().parent / source_session
+    if (sibling / marker).is_file():
+        return sibling
+    found = [d for d in Path(out_dir).resolve().parent.parent.glob(f"*/{source_session}") if (d / marker).is_file()]
+    return found[0] if len(found) == 1 else sibling
+
+
+def tomogram_shape(run, tomo_type: str, voxel_a: float) -> tuple:
+    """Level-0 (z, y, x) shape of the run's ``tomo_type@voxel_a`` tomogram, from the array header only."""
+    import zarr
+
+    spacing = run.get_voxel_spacing(voxel_a) if run is not None else None
+    tomo = spacing.get_tomogram(tomo_type) if spacing is not None else None
+    if tomo is None:
+        raise ValueError(f"missing matching tomogram: {getattr(run, 'name', run)}, {tomo_type}@{voxel_a:g}")
+    try:
+        return tuple(zarr.open(tomo.zarr(), mode="r")["0"].shape)
+    except Exception as exc:
+        raise ValueError(f"unreadable matching tomogram metadata for {getattr(run, 'name', run)}") from exc
+
+
+def segmentation_array_record(seg, tomo_shape: tuple, voxel_a: float) -> dict:
+    """Array metadata of one stored segmentation, checked against its tomogram without reading a voxel.
+
+    Level 0 must have the tomogram's shape, ``z, y, x`` axes, the stated sampling and an integer label dtype. This is
+    what proves a segmentation is the one a downstream step may read; a header alone cannot prove a completed write,
+    which is why every consumer also requires the producing job's completion record."""
+    import zarr
+
+    group = zarr.open(seg.zarr(), mode="r")
+    array = group["0"]
+    multi = group.attrs["multiscales"][0]
+    axes = [axis["name"] if isinstance(axis, dict) else axis for axis in multi["axes"]]
+    level = next(d for d in multi["datasets"] if str(d["path"]) == "0")
+    scale = next(t["scale"] for t in level["coordinateTransformations"] if t["type"] == "scale")
+    if (tuple(array.shape) != tuple(tomo_shape) or len(tomo_shape) != 3 or min(tomo_shape) < 1
+            or axes != ["z", "y", "x"] or len(scale) != 3
+            or not np.allclose(scale, voxel_a, rtol=0, atol=1e-4)
+            or np.dtype(array.dtype).kind not in "bui"):
+        raise ValueError("shape, axes, sampling or label dtype mismatch")
+    return {"shape_zyx": [int(v) for v in tomo_shape], "voxel_size_a": float(voxel_a), "dtype": str(array.dtype)}
 
 
 def validate_reuse(*, config: Path, out_dir: Path, source_session: str, output_session: str,
@@ -28,13 +78,12 @@ def validate_reuse(*, config: Path, out_dir: Path, source_session: str, output_s
     successfully and every requested segmentation passed the existing checks.
     """
     import copick
-    import zarr
 
     validate_session(source_session)
     if not source_session or source_session == output_session:
         raise ValueError("reuse needs a distinct nonempty source session; current outputs must have a new identity")
-    directory = Path(out_dir).resolve().parent / source_session
-    manifest_path = directory / "easymode_shards.json"
+    directory = source_job_dir(out_dir, source_session)
+    manifest_path = directory / SHARD_MANIFEST
     try:
         manifest_bytes = manifest_path.read_bytes()
         manifest = json.loads(manifest_bytes)
@@ -74,38 +123,21 @@ def validate_reuse(*, config: Path, out_dir: Path, source_session: str, output_s
     artifacts = []
     for name in runs:
         run = root.get_run(name)
-        spacing = run.get_voxel_spacing(voxel_a) if run is not None else None
-        tomo = spacing.get_tomogram(tomo_type) if spacing is not None else None
-        if tomo is None:
-            raise ValueError(f"missing matching tomogram for reuse: {name}, {tomo_type}@{voxel_a:g}")
-        try:
-            tomo_shape = tuple(zarr.open(tomo.zarr(), mode="r")["0"].shape)
-        except Exception as exc:
-            raise ValueError(f"unreadable matching tomogram metadata for {name}") from exc
+        tomo_shape = tomogram_shape(run, tomo_type, voxel_a)
         for model in models:
             segs = run.get_segmentations(name=model, user_id="easymode", session_id=source_session,
                                          voxel_size=voxel_a, is_multilabel=False)
             if len(segs) != 1:
                 raise ValueError(f"missing or ambiguous source segmentation: {name}/{model}/{source_session}")
             try:
-                group = zarr.open(segs[0].zarr(), mode="r")
-                array = group["0"]
-                multi = group.attrs["multiscales"][0]
-                axes = [axis["name"] if isinstance(axis, dict) else axis for axis in multi["axes"]]
-                level = next(d for d in multi["datasets"] if str(d["path"]) == "0")
-                scale = next(t["scale"] for t in level["coordinateTransformations"] if t["type"] == "scale")
-                if (tuple(array.shape) != tomo_shape or len(tomo_shape) != 3 or min(tomo_shape) < 1
-                        or axes != ["z", "y", "x"] or len(scale) != 3
-                        or not np.allclose(scale, voxel_a, rtol=0, atol=1e-4)
-                        or np.dtype(array.dtype).kind not in "bui"):
-                    raise ValueError("shape, axes, sampling or label dtype mismatch")
+                record = segmentation_array_record(segs[0], tomo_shape, voxel_a)
             except Exception as exc:
                 raise ValueError(f"incomplete or mismatched segmentation metadata: {name}/{model}") from exc
-            artifacts.append({"run": name, "model": model, "shape_zyx": list(tomo_shape),
-                              "voxel_size_a": voxel_a, "dtype": str(array.dtype)})
+            artifacts.append({"run": name, "model": model, **record})
     return {"source_session": source_session, "output_session": output_session,
             "source_config": str(Path(config).resolve()), "source_inference_manifest": str(manifest_path),
             "source_inference_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "weights": manifest.get("models_fetch"),
             "inference_skipped": True, "validation": "completed inference provenance plus matching array metadata; no voxel read",
             "validated_segmentations": artifacts}
 
@@ -147,3 +179,72 @@ def validate_boundary_reuse(*,config,out_dir,source_session,output_session,runs,
     return {'source_session':source_session,'output_session':output_session,'sample_segmentation':uri,
             'source_manifest':str(source_path),'source_manifest_sha256':hashlib.sha256(source_path.read_bytes()).hexdigest(),
             'inference_skipped':True,'rescale_skipped':True,'validated_masks':artifacts}
+
+
+#: Job types whose ``segmentations.json`` a filament trace may read (binary segmentations of pickable objects).
+TRACEABLE_SEGMENTATION_JOBS = ("copick.segment.easymode",)
+
+
+def resolve_recorded_path(recorded: str, manifest_path: Path) -> Path:
+    """A path a manifest recorded as its job was given it: absolute, or relative to the RELION project directory
+    (two levels above the job directory that holds the manifest)."""
+    candidate = Path(recorded)
+    return candidate if candidate.is_absolute() else Path(manifest_path).resolve().parent.parent.parent / candidate
+
+
+def validate_segmentation_manifest(path: Path, *, config: Path, runs: list[str] | None = None,
+                                   object_name: str | None = None, verify_arrays: bool = True) -> dict:
+    """The segmentation a filament trace reads, taken from its producing job's ``segmentations.json``.
+
+    The checks the reuse path makes on a sibling's shard manifest, made on the bound manifest instead: it is a
+    copick-pipeliner segmentation manifest of a traceable job type, it says ``complete`` (written only after every
+    worker returned and every array verified), it was made in this copick project, it covers every requested run
+    for the object, and -- ``verify_arrays`` -- each run's array still has its tomogram's shape, z/y/x axes, the
+    stated sampling and an integer dtype (headers only, no voxel read). Returns what the trace needs."""
+    import copick
+
+    from .manifest import read_manifest
+
+    path = Path(path)
+    manifest = read_manifest(path)
+    if manifest.get("kind") != "copick-pipeliner/segmentations" or manifest.get("job_type") not in TRACEABLE_SEGMENTATION_JOBS:
+        raise ValueError(f"{path} is a {manifest.get('kind')} manifest of {manifest.get('job_type')!r}; "
+                         f"a trace reads the segmentations.json of {', '.join(TRACEABLE_SEGMENTATION_JOBS)}")
+    if manifest.get("status") != "complete":
+        raise ValueError(f"{path} records status {manifest.get('status')!r}; only a complete segmentation is traced")
+    stated = resolve_recorded_path(str(manifest.get("config") or ""), path)
+    if not manifest.get("config") or stated.resolve() != Path(config).resolve():
+        raise ValueError(f"{path} was made in the copick project {manifest.get('config')!r}, not {config}")
+    objects = list(manifest.get("objects") or [])
+    obj = object_name or manifest.get("segmentation_name")
+    if obj not in objects:
+        raise ValueError(f"{path} has no segmentation of {obj!r} (objects: {objects})")
+    recorded_runs = manifest.get("runs") or {}
+    selected = list(runs) if runs else sorted(recorded_runs)
+    missing = sorted(r for r in selected if not (recorded_runs.get(r) or {}).get("segmentation_present"))
+    if missing:
+        raise ValueError(f"{path} has no {obj} segmentation for runs {missing}")
+    voxel_a = float(manifest["voxel_size_a"])
+    tomo_type = manifest["tomo_type"]
+    session = manifest.get("segmentation_session") or manifest["session_id"]
+    user = manifest.get("user_id") or "easymode"
+    validated = []
+    if verify_arrays:
+        root = copick.from_file(str(config))
+        for name in selected:
+            run = root.get_run(name)
+            if run is None:
+                raise ValueError(f"run {name} of {path} is not in the copick project {config}")
+            segs = run.get_segmentations(name=obj, user_id=user, session_id=session, voxel_size=voxel_a, is_multilabel=False)
+            if len(segs) != 1:
+                raise ValueError(f"{name}: {len(segs)} segmentations {obj}:{user}/{session}@{voxel_a:g}; expected one")
+            try:
+                record = segmentation_array_record(segs[0], tomogram_shape(run, tomo_type, voxel_a), voxel_a)
+            except Exception as exc:
+                raise ValueError(f"{name}: segmentation {obj}:{user}/{session} no longer matches what {path} recorded: {exc}") from exc
+            validated.append({"run": name, **record})
+    return {"manifest": str(path), "manifest_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "job_type": manifest["job_type"], "object": obj, "user_id": user, "session_id": session,
+            "segmentation_uri": f"{obj}:{user}/{session}@{voxel_a:g}", "voxel_size_a": voxel_a, "tomo_type": tomo_type,
+            "runs": selected, "validated_segmentations": validated,
+            "validation": "complete producing-job manifest" + (" plus matching array metadata; no voxel read" if verify_arrays else "")}

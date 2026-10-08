@@ -13,6 +13,9 @@ like any RELION job.
 | `copick.easymode` | copick-easymode segmentation → Octopi radius-aware localization → `particles.star` | GPU (TensorFlow) |
 | `copick.boundary` | octopi `tomogram-boundary` (specimen vs vacuum) → keep picks inside the specimen → `particles.star` | GPU (torch) |
 | `copick.membrain` | MemBrain-seg membranes via copick-torch → `segmentations.json` | GPU (torch) |
+| `copick.segment.easymode` | copick-easymode segmentation only (sharded like `copick.easymode`) → `segmentations.json` | GPU (TensorFlow) |
+| `copick.filaments.trace` | copick-utils `seg2fil` on that segmentation → Filaments + instance segmentation → `filaments.json` | CPU |
+| `copick.filaments.picks` | copick-utils `fil2picks` at a stated spacing → `particles.star` with RELION's filament columns | CPU |
 
 ## Two halves, two environments
 
@@ -55,6 +58,27 @@ like any RELION job.
   every later command runs with `--no-add-objects`. `name:radiusA:filament[:polar|:apolar]` declares a
   filament the way copick stores it (`metadata.copick.filament`, copick's `FilamentSpec`), with the tube
   radius, e.g. `microtubule:120:filament:polar`.
+
+## Filaments
+
+`copick.segment.easymode` → `copick.filaments.trace` → `copick.filaments.picks` → `copick.boundary`, each
+binding the previous job's registered output node (`ProcessData` `copick.manifest.segmentation`, then
+`copick.manifest.filaments`, then the picks' `ParticleGroupMetadata`).
+
+* The segmentation job records, per run and model, the segmentation URI and its array metadata checked
+  against the tomogram (no voxel read), the weights resolved and the inference settings, and says
+  `complete` only after every array verified. `reuse_segmentation_session` records a prior job's
+  verified session (a `copick.easymode` or `copick.segment.easymode` job, found by job number in any job
+  directory) instead of running inference.
+* The trace refuses a segmentation manifest that is not complete, of another project, or missing a run,
+  and an object the project does not declare a filament. Options mirror `seg2fil`; an empty one keeps
+  copick-utils' own default. The Filaments and the instance segmentation (same IDs) are stored under
+  `<object>:trace/<job>`; `filaments.json` has per-run filament IDs, lengths and polarity counts.
+* The picks job requires `spacing_a` (no default, as in copick-utils). Its export writes RELION's
+  filament columns with `rlnAnglePsiFlipRatio` per filament from the trace's Filaments (0 where the
+  polarity is known, 0.5 elsewhere); a pick whose filament is not in them fails the job as a lineage
+  error. `copick.boundary` keeps filament IDs, order and frames (`picksin`) and exports the same way,
+  with polarity from the Filaments its upstream manifest names.
 
 ## Portal-backed projects (no mirror)
 

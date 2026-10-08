@@ -15,7 +15,15 @@ from pathlib import Path
 import numpy as np
 
 from . import dedupe, external, octopi_localization, portal_annotations as portal, shard
-from .segmentation_reuse import validate_boundary_reuse, validate_reuse, validate_session
+from .segmentation_reuse import (
+    resolve_recorded_path,
+    segmentation_array_record,
+    tomogram_shape,
+    validate_boundary_reuse,
+    validate_reuse,
+    validate_segmentation_manifest,
+    validate_session,
+)
 from .. import settings
 from .export_star import PICKS_MANIFEST, export_copick_picks, export_portal_picks, export_selection_picks
 from .export_star import map_runs as export_map_runs
@@ -841,7 +849,150 @@ def _open_for_storage(config: Path | None):
     return copick.from_file(str(config))
 
 
-# ---- copick.easymode ------------------------------------------------------------------
+# ---- copick.easymode / copick.segment.easymode -----------------------------------------
+
+#: The copick user every easymode segmentation (and the picks made from it) is stored under.
+EASYMODE_USER = "easymode"
+
+
+def _easymode_inference(
+    *, config: Path, out_dir: Path, session_id: str, source_session: str, models: list[str], objects: list[str],
+    tomo_type: str, voxel_a: float, runs: list[str], tta: int, threshold: float, batch_size: int, gpus: str | None,
+    use_gpu: bool, threads: int | None, runner: external.Runner, max_workers: int | None, shard_hooks: dict | None,
+    reuse: bool,
+) -> tuple[dict, dict | None]:
+    """easymode segmentations of ``objects`` for ``runs``, at ``voxel_a`` (already snapped), in ``source_session``.
+
+    Either sharded inference into this job's session (``shard.run_easymode_sharded``: one worker per allocated GPU,
+    raising before anything downstream when a worker fails or a segmentation is missing), or -- ``reuse`` -- a
+    completed sibling job's session verified by ``validate_reuse`` (its shard manifest plus every array's metadata),
+    never an inference fallback. Returns ``(shard manifest, recovery record or None)``; both easymode job types call
+    this, so the inference path is one code path."""
+    def argv_for(shard_runs: list[str]) -> list[str]:
+        # No --gpus for a worker: its CUDA_VISIBLE_DEVICES is set in its environment (shard.worker_env).
+        return external.easymode_segment_argv(
+            config=str(config), models=models, tomo_type=tomo_type, voxel_a=voxel_a, runs=shard_runs, tta=tta,
+            threshold=threshold, batch_size=batch_size, user_id=EASYMODE_USER, session_id=session_id, gpus=None)
+
+    recovery = None
+    if reuse:
+        recovery = validate_reuse(
+            config=config, out_dir=out_dir, source_session=source_session, output_session=session_id,
+            runs=runs, models=objects, tomo_type=tomo_type, voxel_a=voxel_a,
+            tta=tta, threshold=threshold, batch_size=batch_size)
+        shards = {"workers": [], "n_workers": 0, "devices": [], "skipped_existing": runs,
+                  "status": "reused completed source session", "source_session": source_session,
+                  "session_id": session_id, "inference_skipped": True, "recovery": recovery}
+        if not runner.dry_run:
+            shard._write(Path(out_dir) / shard.SHARD_MANIFEST, shards)
+    else:
+        hooks = shard_hooks or {}
+        shards = shard.run_easymode_sharded(
+            out_dir=out_dir, config=config, runs=runs, models=objects, features=models, user_id=EASYMODE_USER,
+            session_id=session_id, voxel_a=voxel_a, argv_for=argv_for, gpus=gpus, use_gpu=use_gpu, threads=threads,
+            max_workers=max_workers, dry_run=runner.dry_run, **hooks)
+    for w in shards["workers"]:
+        runner.log.append(["<worker>", f"gpu={w['gpu']}", *w["argv"]])
+    return shards, recovery
+
+
+def segment_easymode(
+    *, config: Path, out_dir: Path, session_id: str, models: list[str], tomo_type: str, voxel_a: float,
+    runs: list[str] | None, tta: int, threshold: float, batch_size: int, gpus: str | None, use_gpu: bool,
+    threads: int | None, runner: external.Runner, max_workers: int | None = None, shard_hooks: dict | None = None,
+    reuse_segmentation_session: str = "",
+) -> dict:
+    """easymode segmentation only: sharded inference (or a verified reuse), then ``segmentations.json``.
+
+    The manifest is the product a tracing job binds to: per run and model the segmentation URI and its array
+    metadata (shape, dtype, sampling, checked against the run's tomogram without reading a voxel), plus the weights
+    the job resolved and the inference settings. It is written only after every requested segmentation verified, so
+    its ``status: complete`` is the completion record a consumer requires (``validate_segmentation_manifest``).
+    """
+    objects = [external.copick_object_name(m) for m in models]
+    if not objects:
+        raise ValueError("no easymode models given")
+    source_session = validate_session(reuse_segmentation_session) or session_id
+    requested_voxel_a = float(voxel_a)
+    voxel_a = snap_voxel_size(config, voxel_a)
+    selected = runs or sorted(read_project_manifest(config).get("runs", {}))
+    if not selected:
+        raise ValueError(f"no runs to segment: none given and the project manifest beside {config} lists none")
+    shards, recovery = _easymode_inference(
+        config=config, out_dir=out_dir, session_id=session_id, source_session=source_session, models=models,
+        objects=objects, tomo_type=tomo_type, voxel_a=voxel_a, runs=selected, tta=tta, threshold=threshold,
+        batch_size=batch_size, gpus=gpus, use_gpu=use_gpu, threads=threads, runner=runner, max_workers=max_workers,
+        shard_hooks=shard_hooks, reuse=bool(reuse_segmentation_session))
+    uris = {obj: external.seg_uri(obj, EASYMODE_USER, source_session, voxel_a) for obj in objects}
+    manifest = new_manifest("segmentations", job_type="copick.segment.easymode", session_id=session_id,
+                            user_id=EASYMODE_USER, config=str(config))
+    manifest.update({
+        "tool": "copick-easymode",
+        "status": "dry run" if runner.dry_run else "complete",
+        "models": list(models),
+        "objects": objects,
+        # The primary model's names, in the shape copick.membrain's manifest has them.
+        "segmentation_name": objects[0],
+        "segmentation_uri": uris[objects[0]],
+        "segmentations": uris,
+        "segmentation_session": source_session,
+        "tomo_type": tomo_type,
+        "voxel_size_a": voxel_a,
+        "voxel_size_requested_a": requested_voxel_a,
+        "tta": int(tta),
+        "threshold": float(threshold),
+        "batch_size": int(batch_size),
+        "weights": shards.get("models_fetch") or (recovery or {}).get("weights"),
+        "inference_skipped": bool(reuse_segmentation_session),
+        "recovery": recovery,
+        "sharding": {"n_workers": shards["n_workers"], "devices": shards["devices"],
+                     "skipped_existing": shards["skipped_existing"], "status": shards.get("status"),
+                     "manifest": str(Path(out_dir) / shard.SHARD_MANIFEST)},
+    })
+    if runner.dry_run:
+        manifest["runs"] = {name: {"segmentation_present": None, "segmentation_uri": uris[objects[0]]} for name in selected}
+    else:
+        manifest["runs"] = describe_segmentations(config, selected, objects, user_id=EASYMODE_USER,
+                                                  session_id=source_session, voxel_a=voxel_a, tomo_type=tomo_type)
+    if manifest["weights"] is None:
+        manifest["notes"].append("weights not recorded: "
+                                 + ("inference was skipped (reused session)" if reuse_segmentation_session else "no fetch record"))
+    manifest["totals"] = {"n_runs": len(manifest["runs"]),
+                          "n_with_segmentation": sum(1 for r in manifest["runs"].values() if r.get("segmentation_present"))}
+    write_manifest(Path(out_dir) / SEGMENTATION_MANIFEST, manifest)
+    return manifest
+
+
+def describe_segmentations(config: Path, runs: list[str], objects: list[str], *, user_id: str, session_id: str,
+                           voxel_a: float, tomo_type: str) -> dict[str, dict]:
+    """Per run, every object's segmentation URI and verified array metadata (``segmentation_array_record``).
+
+    A missing or mismatched segmentation raises: this runs after inference reported success, so an absence here is
+    a broken product, not a run without signal."""
+    import copick
+
+    root = copick.from_file(str(config))
+    out: dict[str, dict] = {}
+    for name in runs:
+        run = root.get_run(name)
+        if run is None:
+            raise ValueError(f"run {name} is not in the copick project {config}")
+        tomo_shape = tomogram_shape(run, tomo_type, voxel_a)
+        per_object = {}
+        for obj in objects:
+            segs = run.get_segmentations(name=obj, user_id=user_id, session_id=session_id, voxel_size=voxel_a, is_multilabel=False)
+            if len(segs) != 1:
+                raise ValueError(f"{name}: {len(segs)} segmentations {external.seg_uri(obj, user_id, session_id, voxel_a)}; expected one")
+            try:
+                record = segmentation_array_record(segs[0], tomo_shape, voxel_a)
+            except Exception as exc:
+                raise ValueError(f"{name}: segmentation {obj} does not match its tomogram {tomo_type}@{voxel_a:g}: {exc}") from exc
+            per_object[obj] = {"segmentation_uri": external.seg_uri(obj, user_id, session_id, voxel_a), **record}
+        primary = per_object[objects[0]]
+        out[name] = {"segmentation_present": True, "segmentation_uri": primary["segmentation_uri"],
+                     "shape_zyx": primary["shape_zyx"], "dtype": primary["dtype"], "segmentations": per_object}
+    return out
+
 
 def easymode(
     *, config: Path, out_dir: Path, session_id: str, models: list[str], tomo_type: str, voxel_a: float,
@@ -863,7 +1014,7 @@ def easymode(
     parallelism; ``None``/``0`` = automatic (bounded by the job's memory and the volume size,
     see ``bounded_workers``), a positive integer = exactly that many.
     """
-    user = "easymode"
+    user = EASYMODE_USER
     # copick-side names: what the segmentations and picks are stored and looked up under. The
     # easymode names (``models``) are what copick-easymode is asked to run.
     objects = [external.copick_object_name(m) for m in models]
@@ -887,30 +1038,11 @@ def easymode(
         localization.update(maxima_filter_size=maxima_filter_size, min_particle_size=min_particle_size, max_particle_size=max_particle_size)
 
 
-    def argv_for(shard_runs: list[str]) -> list[str]:
-        # No --gpus for a worker: its CUDA_VISIBLE_DEVICES is set in its environment (shard.worker_env).
-        return external.easymode_segment_argv(
-            config=str(config), models=models, tomo_type=tomo_type, voxel_a=voxel_a, runs=shard_runs, tta=tta,
-            threshold=threshold, batch_size=batch_size, user_id=user, session_id=session_id, gpus=None)
-
-    recovery = None
-    if reuse_segmentation_session:
-        recovery = validate_reuse(
-            config=config, out_dir=out_dir, source_session=source_session, output_session=session_id,
-            runs=selected, models=objects, tomo_type=tomo_type, voxel_a=voxel_a,
-            tta=tta, threshold=threshold, batch_size=batch_size)
-        shards = {"workers": [], "n_workers": 0, "devices": [], "skipped_existing": selected,
-                  "status": "reused completed source session", "source_session": source_session,
-                  "session_id": session_id, "inference_skipped": True, "recovery": recovery}
-        if not runner.dry_run:
-            shard._write(Path(out_dir) / shard.SHARD_MANIFEST, shards)
-    else:
-        hooks = shard_hooks or {}
-        shards = shard.run_easymode_sharded(
-            out_dir=out_dir, config=config, runs=selected, models=objects, features=models, user_id=user, session_id=session_id,
-            voxel_a=voxel_a, argv_for=argv_for, gpus=gpus, use_gpu=use_gpu, threads=threads, max_workers=max_workers, dry_run=runner.dry_run, **hooks)
-    for w in shards["workers"]:
-        runner.log.append(["<worker>", f"gpu={w['gpu']}", *w["argv"]])
+    shards, recovery = _easymode_inference(
+        config=config, out_dir=out_dir, session_id=session_id, source_session=source_session, models=models,
+        objects=objects, tomo_type=tomo_type, voxel_a=voxel_a, runs=selected, tta=tta, threshold=threshold,
+        batch_size=batch_size, gpus=gpus, use_gpu=use_gpu, threads=threads, runner=runner, max_workers=max_workers,
+        shard_hooks=shard_hooks, reuse=bool(reuse_segmentation_session))
     # seg2picks loads one whole segmentation per worker: bound the parallelism by the job's
     # memory and the volume size, not by the CPU count (10426 at 8.66 A: 64 workers -> OOM),
     # unless the job states an explicit count.
@@ -986,6 +1118,212 @@ def easymode(
                 "seg2picks_parallelism": seg2picks_accounting,
                 "localization": localization},
     )
+
+
+# ---- copick.filaments.trace / copick.filaments.picks ------------------------------------
+
+#: The copick users the filament jobs store under (the session is always the job number).
+TRACE_USER = "trace"
+FILAMENT_PICKS_USER = "fil2picks"
+FILAMENTS_MANIFEST = "filaments.json"
+#: What a filament trace's options are called here, in the units they are given in.
+SEG2FIL_OPTION_UNITS = {
+    "min_length": "A", "min_aspect": "label diameters", "min_radius": "A", "fill_lumen": "A", "min_volume": "A^3",
+    "prune_length": "A", "junction_merge": "A", "max_bend": "deg", "smoothing": "A",
+}
+
+
+def tool_versions() -> dict:
+    """The copick packages this environment ran (the provenance of what a filament manifest describes)."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    out = {}
+    for dist in ("copick", "copick-utils"):
+        try:
+            out[dist] = version(dist)
+        except PackageNotFoundError:
+            out[dist] = None
+    return out
+
+
+def require_filament_object(config: Path, object_name: str):
+    """The copick object, refused unless the project declares it a filament (``name:radius:filament[:polar]``):
+    the filament picks, their frames and their RELION columns all follow from that declaration."""
+    import copick
+
+    obj = copick.from_file(str(config)).get_object(object_name)
+    if obj is None:
+        raise ValueError(f"object {object_name!r} is not registered in the copick project {config}")
+    if not obj.is_filament:
+        raise ValueError(f"object {object_name!r} is not declared a filament in {config}; declare it in copick.project's "
+                         f"objects as {object_name}:<tube radius A>:filament[:polar|:apolar]")
+    return obj
+
+
+def _arc_length(points) -> float:
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    return float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum()) if len(pts) > 1 else 0.0
+
+
+def summarize_filaments(config: Path, runs: list[str], object_name: str, *, user_id: str, session_id: str,
+                        voxel_a: float, tomo_type: str) -> dict[str, dict]:
+    """Per run: the traced filaments (IDs, lengths along their points, polarity) and the instance segmentation.
+
+    Exact accounting over what was stored. A run with filaments but no instance segmentation is a broken product
+    (``--instances`` was asked for) and raises; a run where nothing was traced is recorded with zero filaments."""
+    import copick
+
+    root = copick.from_file(str(config))
+    out: dict[str, dict] = {}
+    for name in runs:
+        run = root.get_run(name)
+        if run is None:
+            raise ValueError(f"run {name} is not in the copick project {config}")
+        sets = run.get_filaments(object_name=object_name, user_id=user_id, session_id=session_id)
+        if len(sets) > 1:
+            raise ValueError(f"{name}: {len(sets)} Filaments {object_name}:{user_id}/{session_id}; expected one")
+        filaments = list(sets[0].filaments) if sets else []
+        lengths = [_arc_length(f.points) for f in filaments]
+        instances = run.get_segmentations(name=object_name, user_id=user_id, session_id=session_id, voxel_size=voxel_a,
+                                          is_instance=True)
+        record = None
+        if instances:
+            try:
+                record = segmentation_array_record(instances[0], tomogram_shape(run, tomo_type, voxel_a), voxel_a)
+            except Exception as exc:
+                raise ValueError(f"{name}: the instance segmentation does not match its tomogram {tomo_type}@{voxel_a:g}: {exc}") from exc
+        elif filaments:
+            raise ValueError(f"{name}: {len(filaments)} filaments traced but no instance segmentation "
+                             f"{object_name}:{user_id}/{session_id}@{voxel_a:g} was written")
+        out[name] = {
+            "filaments_present": bool(sets),
+            "n_filaments": len(filaments),
+            "filament_ids": [int(f.instance_id) for f in filaments],
+            "lengths_a": [round(v, 3) for v in lengths],
+            "length_total_a": float(sum(lengths)),
+            "length_median_a": float(np.median(lengths)) if lengths else None,
+            "n_polarity_known": int(sum(bool(f.polarity_known) for f in filaments)),
+            "instance_segmentation_present": record is not None,
+            "instance_segmentation": record,
+        }
+    return out
+
+
+def trace_filaments(
+    *, config: Path, out_dir: Path, session_id: str, in_segmentation: Path, object_name: str | None,
+    runs: list[str] | None, options: dict | None, extend_ends: bool | None, curve: str | None, label: int | None,
+    threads: int | None, runner: external.Runner,
+) -> dict:
+    """``copick convert seg2fil`` over a verified segmentation -> Filaments + instance segmentation -> ``filaments.json``.
+
+    The segmentation is the one the bound ``segmentations.json`` names (``validate_segmentation_manifest``); the
+    output Filaments and the instance segmentation (same IDs) are stored under ``<object>:trace/<this job>``."""
+    seg = validate_segmentation_manifest(Path(in_segmentation), config=config, runs=runs, object_name=object_name or None,
+                                         verify_arrays=not runner.dry_run)
+    obj, voxel_a, tomo_type = seg["object"], seg["voxel_size_a"], seg["tomo_type"]
+    spec = None if runner.dry_run else require_filament_object(config, obj).filament
+    filaments_uri = external.seg_uri(obj, TRACE_USER, session_id)
+    instances_uri = external.seg_uri(obj, TRACE_USER, session_id, voxel_a)
+    # Tracing loads one whole segmentation per worker (skeleton, distance maps, labels), as seg2picks does: bound the
+    # parallelism by the job's memory and the volume size, not by the CPU count.
+    workers, accounting = bounded_workers(threads, None if runner.dry_run else tomogram_voxels(config, tomo_type, voxel_a),
+                                          job_memory_limit_bytes())
+    argv = external.seg2fil_argv(
+        config=str(config), seg_uri_in=seg["segmentation_uri"], filaments_uri=filaments_uri,
+        instances_uri=instances_uri + "?instance=true", runs=seg["runs"], options=options, extend_ends=extend_ends,
+        curve=curve, label=label, workers=workers)
+    runner.run(argv)
+    manifest = new_manifest("filaments", job_type="copick.filaments.trace", session_id=session_id, user_id=TRACE_USER,
+                            config=str(config))
+    manifest.update({
+        "status": "dry run" if runner.dry_run else "complete",
+        "object": obj,
+        "filament_spec": spec.model_dump(exclude_none=True) if spec is not None else None,
+        "filaments_uri": filaments_uri,
+        "instance_segmentation_uri": instances_uri,
+        "tomo_type": tomo_type,
+        "voxel_size_a": voxel_a,
+        "source": {"kind": "copick-segmentation", **{k: v for k, v in seg.items() if k != "validated_segmentations"}},
+        "tool": {"command": "copick convert seg2fil", "argv": argv, "versions": tool_versions(), "workers": accounting},
+        # None = not given, so copick-utils' own default (or its derivation from the segmentation) applied.
+        "options": {**{name: (options or {}).get(name) for name in SEG2FIL_OPTION_UNITS},
+                    "units": SEG2FIL_OPTION_UNITS, "extend_ends": extend_ends, "curve": curve, "label": label},
+    })
+    if not runner.dry_run:
+        manifest["runs"] = summarize_filaments(config, seg["runs"], obj, user_id=TRACE_USER, session_id=session_id,
+                                               voxel_a=voxel_a, tomo_type=tomo_type)
+    lengths = [v for r in manifest["runs"].values() for v in r["lengths_a"]]
+    manifest["totals"] = {
+        "n_runs": len(manifest["runs"]),
+        "n_filaments": int(sum(r["n_filaments"] for r in manifest["runs"].values())),
+        "n_runs_without_filaments": sum(1 for r in manifest["runs"].values() if r["n_filaments"] == 0),
+        "length_total_a": float(sum(lengths)),
+        "length_median_a": float(np.median(lengths)) if lengths else None,
+        "n_polarity_known": int(sum(r["n_polarity_known"] for r in manifest["runs"].values())),
+    }
+    write_manifest(Path(out_dir) / FILAMENTS_MANIFEST, manifest)
+    return manifest
+
+
+def validate_filaments_manifest(path: Path, *, config: Path, runs: list[str] | None = None) -> dict:
+    """The Filaments a sampling job reads, from its producing trace job's ``filaments.json``: a complete trace, made
+    in this copick project, covering every requested run."""
+    path = Path(path)
+    manifest = read_manifest(path)
+    if manifest.get("kind") != "copick-pipeliner/filaments" or manifest.get("job_type") != "copick.filaments.trace":
+        raise ValueError(f"{path} is a {manifest.get('kind')} manifest of {manifest.get('job_type')!r}, not a filament trace")
+    if manifest.get("status") != "complete":
+        raise ValueError(f"{path} records status {manifest.get('status')!r}; only a complete trace is sampled")
+    stated = resolve_recorded_path(str(manifest.get("config") or ""), path)
+    if not manifest.get("config") or stated.resolve() != Path(config).resolve():
+        raise ValueError(f"{path} was traced in the copick project {manifest.get('config')!r}, not {config}")
+    recorded = manifest.get("runs") or {}
+    selected = list(runs) if runs else sorted(recorded)
+    unknown = sorted(set(selected) - set(recorded))
+    if unknown:
+        raise ValueError(f"{path} did not trace runs {unknown}")
+    return manifest | {"selected_runs": selected}
+
+
+def filament_picks(
+    *, config: Path, out_dir: Path, session_id: str, in_filaments: Path, spacing_a: float, anchor: str | None,
+    roll: str | None, seed: int | None, runs: list[str] | None, layout: str, threads: int | None,
+    runner: external.Runner,
+) -> dict:
+    """``copick convert fil2picks`` at ``spacing_a`` over a verified trace -> picks -> ``particles.star`` through
+    copick's RELION export with filament columns, polarity per filament from the trace's Filaments."""
+    if spacing_a is None or not float(spacing_a) > 0:
+        raise ValueError("spacing_a is required (> 0 Angstrom): no spacing suits every filament")
+    trace = validate_filaments_manifest(Path(in_filaments), config=config, runs=runs)
+    obj = trace["object"]
+    if not runner.dry_run:
+        require_filament_object(config, obj)
+    picks_uri = external.seg_uri(obj, FILAMENT_PICKS_USER, session_id)
+    selected = trace["selected_runs"]
+    argv = external.fil2picks_argv(config=str(config), filaments_uri=trace["filaments_uri"], picks_uri=picks_uri,
+                                   spacing_a=spacing_a, anchor=anchor, roll=roll, seed=seed, runs=selected, workers=threads)
+    runner.run(argv)
+    source = {
+        "kind": "copick-filaments",
+        "filaments_uri": trace["filaments_uri"],
+        "filaments_manifest": str(in_filaments),
+        "trace_session": trace["session_id"],
+        "spacing_a": float(spacing_a),
+        "anchor": anchor,
+        "roll": roll,
+        "seed": seed,
+        "tool": {"command": "copick convert fil2picks", "argv": argv, "versions": tool_versions()},
+    }
+    if runner.dry_run:
+        return {"dry_run": True, "picks_uri": picks_uri, "source": source}
+    manifest = export_copick_picks(
+        config=config, out_dir=out_dir, picks_uri=picks_uri, tomo_type=trace["tomo_type"], voxel_a=trace["voxel_size_a"],
+        layout=layout, runs=selected, session_id=session_id, job_type="copick.filaments.picks", source=source,
+        tilt_series_pixel_size_a=_project_tilt_pixel_sizes(config), filaments_uri=trace["filaments_uri"])
+    for run, info in manifest["runs"].items():
+        info["n_traced_filaments"] = (trace["runs"].get(run) or {}).get("n_filaments")
+    write_manifest(Path(out_dir) / PICKS_MANIFEST, manifest)
+    return manifest
 
 
 # ---- copick.boundary ------------------------------------------------------------------
