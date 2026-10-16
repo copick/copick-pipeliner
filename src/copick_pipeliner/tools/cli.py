@@ -70,7 +70,7 @@ def portal_picks(out_dir, session_id, threads, runs, dry_run, config, dataset_di
 @click.option("--tomo-type", default="wbp")
 @click.option("--voxel-size", type=float, default=None)
 @click.option("--tomogram-id", default=None)
-@click.option("--objects", default="ribosome:150,membrane:0,sample:0,vacuum:0,boundary:0", help="name:radiusA list; radius 0 = segmentation-only object.")
+@click.option("--objects", default="ribosome:150,membrane:0,sample:0,vacuum:0,boundary:0", help="name:radiusA[:filament[:polar|:apolar]] list; radius 0 = segmentation-only object, :filament declares a filament.")
 @click.option("--overlay-root", type=click.Path(file_okay=False), default=None)
 @click.option("--link-volumes/--copy-volumes", default=True, help="Reference an existing OME-zarr in place (default) instead of converting it into the overlay.")
 @click.option("--selection", type=click.Path(exists=True, dir_okay=False), default=None, help="A resolved portal_selection.json: a portal-backed project whose tomograms stream from the portal.")
@@ -132,6 +132,74 @@ def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
     click.echo(json.dumps(manifest.get("totals", manifest)))
 
 
+@main.command("segment-easymode")
+@_common
+@_gpu_options
+@click.option("--config", type=click.Path(exists=True, dir_okay=False), required=True)
+@click.option("--models", default="microtubule", help="easymode models (comma list); the first is the primary segmentation.")
+@click.option("--tomo-type", default="wbp", help="copick tomogram type; an empty value reads the type the project records.")
+@click.option("--voxel-size", type=float, required=True)
+@click.option("--tta", type=int, default=4)
+@click.option("--threshold", type=float, default=0.5)
+@click.option("--batch-size", type=int, default=1)
+@click.option("--max-workers", type=int, default=None, help="Cap on parallel inference workers (default: one per visible GPU).")
+@click.option("--reuse-segmentation-session", default="", help="Completed sibling job's session whose verified segmentations this job records instead of running inference.")
+def segment_easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, models, tomo_type, voxel_size, tta, threshold, batch_size, max_workers, reuse_segmentation_session):
+    """copick-easymode segmentation only (one worker per allocated GPU) -> segmentations.json."""
+    manifest = orchestrate.segment_easymode(
+        config=Path(config), out_dir=Path(out_dir), session_id=session_id, models=[m.strip() for m in models.split(",") if m.strip()],
+        tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type), voxel_a=voxel_size, runs=_runs(runs), tta=tta,
+        threshold=threshold, batch_size=batch_size, gpus=gpus, use_gpu=not no_gpu, threads=threads, runner=Runner(dry_run=dry_run),
+        max_workers=max_workers, reuse_segmentation_session=reuse_segmentation_session,
+    )
+    click.echo(json.dumps(manifest["totals"]))
+
+
+def _seg2fil_options(func):
+    for name, unit in reversed(list(orchestrate.SEG2FIL_OPTION_UNITS.items())):
+        func = click.option(f"--{name.replace('_', '-')}", name, type=float, default=None,
+                            help=f"copick convert seg2fil --{name.replace('_', '-')} ({unit}); unset keeps copick-utils' default.")(func)
+    return func
+
+
+@main.command("trace-filaments")
+@_common
+@click.option("--config", type=click.Path(exists=True, dir_okay=False), required=True)
+@click.option("--in-segmentation", type=click.Path(exists=True, dir_okay=False), required=True, help="segmentations.json of a copick.segment.easymode job.")
+@click.option("--object", "object_name", default=None, help="Object to trace (default: the segmentation's primary object).")
+@_seg2fil_options
+@click.option("--extend-ends/--no-extend-ends", default=None, help="Extend free ends to the segmentation's edge (unset: copick-utils' default).")
+@click.option("--curve", type=click.Choice(["catmull-rom", "bspline"]), default=None, help="Curve stored per filament (unset: copick-utils' default).")
+@click.option("--label", type=int, default=None, help="Label to trace in a multilabel segmentation.")
+def trace_filaments(out_dir, session_id, threads, runs, dry_run, config, in_segmentation, object_name, extend_ends, curve, label, **options):
+    """copick convert seg2fil over a verified segmentation -> Filaments + instance segmentation -> filaments.json."""
+    manifest = orchestrate.trace_filaments(
+        config=Path(config), out_dir=Path(out_dir), session_id=session_id, in_segmentation=Path(in_segmentation),
+        object_name=object_name, runs=_runs(runs), options=options, extend_ends=extend_ends, curve=curve, label=label,
+        threads=threads, runner=Runner(dry_run=dry_run),
+    )
+    click.echo(json.dumps(manifest["totals"]))
+
+
+@main.command("filament-picks")
+@_common
+@click.option("--config", type=click.Path(exists=True, dir_okay=False), required=True)
+@click.option("--in-filaments", type=click.Path(exists=True, dir_okay=False), required=True, help="filaments.json of a copick.filaments.trace job.")
+@click.option("--spacing", "spacing_a", type=float, required=True, help="Distance between picks along a filament (A). Required: no spacing suits every filament.")
+@click.option("--anchor", type=click.Choice(["center", "start"]), default=None, help="Unset keeps copick-utils' default (center).")
+@click.option("--roll", type=click.Choice(["parallel", "random"]), default=None, help="Unset keeps copick-utils' default (parallel).")
+@click.option("--seed", type=int, default=None, help="Random seed for --roll random.")
+@click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
+def filament_picks(out_dir, session_id, threads, runs, dry_run, config, in_filaments, spacing_a, anchor, roll, seed, layout):
+    """copick convert fil2picks over a verified trace -> picks -> particles.star (copick's export, filament columns)."""
+    manifest = orchestrate.filament_picks(
+        config=Path(config), out_dir=Path(out_dir), session_id=session_id, in_filaments=Path(in_filaments),
+        spacing_a=spacing_a, anchor=anchor, roll=roll, seed=seed, runs=_runs(runs), layout=layout, threads=threads,
+        runner=Runner(dry_run=dry_run),
+    )
+    click.echo(json.dumps(manifest.get("totals", manifest)))
+
+
 @main.command()
 @_common
 @_gpu_options
@@ -179,14 +247,16 @@ def membrain(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
 @click.option("--tomo-type", default="wbp", help="copick tomogram type; an empty value reads the type the project records.")
 @click.option("--voxel-size", type=float, required=True)
 @click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
-@click.option("--orientations", type=click.Choice(["measured", "identity_initialisation"]), default="identity_initialisation")
-def export_star(out_dir, session_id, threads, runs, dry_run, config, picks_uri, tomo_type, voxel_size, layout, orientations):
-    """Any copick pick set -> particles.star + picks_manifest.json."""
+@click.option("--filaments-uri", default=None, help="Filament picks: the Filaments (object:user/session) they were sampled from; "
+              "writes RELION's filament columns with each filament's polarity.")
+def export_star(out_dir, session_id, threads, runs, dry_run, config, picks_uri, tomo_type, voxel_size, layout, filaments_uri):
+    """Any copick pick set -> particles.star + picks_manifest.json, written by copick's RELION export."""
     from .export_star import export_copick_picks
 
     manifest = export_copick_picks(
         config=Path(config), out_dir=Path(out_dir), picks_uri=picks_uri, tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type), voxel_a=voxel_size, layout=layout,
-        runs=_runs(runs), session_id=session_id, job_type="copick.export", orientations=orientations,
+        runs=_runs(runs), session_id=session_id, job_type="copick.export", filaments_uri=filaments_uri,
+        tilt_series_pixel_size_a=orchestrate._project_tilt_pixel_sizes(Path(config)),
     )
     click.echo(json.dumps(manifest["totals"]))
 

@@ -1,30 +1,34 @@
-"""RELION particle STAR export: from deposited portal annotations, or from copick picks.
+"""RELION particle STAR files through copick's own export, from deposited portal annotations or from copick picks.
 
-Two layouts (``coords.LAYOUTS``), both carrying **native centered Angstrom** coordinates:
+This package does not write STAR files. copick does, in one implementation of the RELION conventions (positions as
+``location + translation``, centered Angstrom coordinates, inverse-ZYZ Euler angles, the filament frame, tube IDs,
+track lengths and per-filament polarity):
+
+* picks stored in copick go through ``copick.ops.export.export_relion_particles`` (one call, every run, errors raised);
+* portal annotations read as arrays go through ``copick.util.formats.build_relion_star_tables`` and its writers
+  (``write_relion_import_bundle``, ``write_star_particles``).
+
+What stays here is the choice of what to export and in which geometry, the lineage checks, and the manifest
+(``picks_manifest.json``) ApexAgent's extractor reads. Two layouts (``coords.LAYOUTS``), both with **centered Angstrom
+coordinates only** (``coordinates="centered"``: a run without a tomogram center is an error, never a legacy pixel
+fallback):
 
 ``import_centered``
-    The bundle ``relion_tomo_import_coordinates`` actually consumes (verified with the
-    installed RELION 5.1 binary on 2026-09-22: 503 picks in, 503 out, coordinate error
-    5e-6 A): the registered ``particles.star`` is an **index** block
-    ``data_coordinate_files`` with ``rlnTomoName`` and ``rlnTomoImportParticleFile``, one
-    row per run, each naming a companion ``coordinates/<run>.star`` that holds a single
-    ``data_particles`` block with ``rlnTomoName``, ``rlnCenteredCoordinate{X,Y,Z}Angst``
-    and the Euler angles. Paths are written exactly as ``out_dir`` was given, so a
-    project-relative job directory (``AutoPick/job012``) yields project-relative paths
-    that resolve from the RELION project working directory in a queued/container child.
-    The ``--centered/--scale_factor/--add_factor`` flags of the importer apply to its ASCII
-    branch only; a STAR input is read natively, so the centered columns are required.
+    The bundle ``relion_tomo_import_coordinates`` consumes (verified with the installed RELION 5.1 binary on
+    2026-09-22: 503 picks in, 503 out, coordinate error 5e-6 A): the registered ``particles.star`` is an **index**
+    block ``data_coordinate_files`` with ``rlnTomoName`` and ``rlnTomoImportParticleFile``, one row per run with
+    picks, each naming a companion ``coordinates/<run>.star`` with one ``data_particles`` block. RELION appends the
+    per-run tables and refuses differing columns, so copick splits one table built for all runs. Paths are formed
+    from ``out_dir`` as given, so a project-relative job directory (``AutoPick/job012``) yields project-relative
+    paths that resolve from the RELION project directory in a queued or container child.
 ``relion5``
-    A flat native particle file: ``data_optics`` + ``data_particles`` with the same
-    columns, for a direct ``relion.pseudosubtomo.in_particles`` binding.
-
-``export_portal_picks`` needs no copick at all (JSON/NDJSON in, STAR + manifest out);
-the copick storage and ``export_copick_picks`` import copick lazily and run where it is
-installed.
+    One flat file: ``data_particles`` plus, when every run's tilt-series pixel size is known, ``data_optics`` with
+    one group per run, for a direct ``relion.pseudosubtomo.in_particles`` binding.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -37,8 +41,6 @@ from .coords import (
     LAYOUT_RELION5,
     LAYOUTS,
     VolumeGeometry,
-    optics_table,
-    particles_table,
     voxels_to_angstrom,
     within_volume,
 )
@@ -48,52 +50,61 @@ PARTICLES_STAR = "particles.star"
 PICKS_MANIFEST = "picks_manifest.json"
 COORDINATES_DIR = "coordinates"
 INDEX_BLOCK = "coordinate_files"
+#: The layout names here (and in ApexAgent's presets and manifests) -> copick's.
+COPICK_LAYOUTS = {LAYOUT_IMPORT_CENTERED: "import", LAYOUT_RELION5: "particles"}
+#: What the Euler angles of an export are: measurements, an initialization (identity rotations written as 0, 0, 0),
+#: or the filament frame (``rlnTomoSubtomogram*`` = the frame, ``rlnAngle*`` = 0, 90, 0 with priors).
+ORIENTATIONS = ("measured", "identity_initialisation", "filament_frame")
 
 
-# ---- writers ------------------------------------------------------------------------
+def _copick_layout(layout: str) -> str:
+    if layout not in LAYOUTS:
+        raise ValueError(f"unknown STAR layout {layout!r}; choose one of {LAYOUTS}")
+    return COPICK_LAYOUTS[layout]
 
 
-def write_import_bundle(out_dir: Path, tables_by_run: dict[str, pd.DataFrame]) -> tuple[Path, dict[str, str]]:
-    """The ``import_centered`` bundle: per-run coordinate files plus the index ``particles.star``.
+def particles_path(out_dir) -> str:
+    """``<out_dir>/particles.star`` formed from the string given (relative stays relative, never resolved)."""
+    return os.path.join(str(out_dir), PARTICLES_STAR)
 
-    Returns the index path and ``{run: coordinate-file path as written}``. The paths are
-    formed from ``out_dir`` verbatim (relative stays relative), never from the process cwd.
+
+def write_array_tables(
+    out_dir: Path, arrays_by_run: dict[str, tuple[np.ndarray, np.ndarray | None]], geometry_by_run: dict[str, VolumeGeometry],
+    *, layout: str, tilt_series_pixel_sizes: dict[str, float | None],
+) -> tuple[str, dict[str, str]]:
+    """Picks held as arrays (corner-origin Angstrom positions, optional rotation matrices) -> copick's RELION writers.
+
+    Each run's tomogram center is its geometry's (``VolumeGeometry.center_a``: origin + dims x voxel / 2), passed
+    to copick explicitly. Returns ``(particles.star path, {run: coordinate file})``; runs without picks get no rows.
     """
-    out_dir = Path(out_dir)
-    coord_dir = out_dir / COORDINATES_DIR
-    coord_dir.mkdir(parents=True, exist_ok=True)
-    files: dict[str, str] = {}
-    for run, table in tables_by_run.items():
-        if "/" in run or run in ("", ".", ".."):
-            raise ValueError(f"run name {run!r} is not usable as a file name")
-        if len(table) == 0:
-            # A run with no picks gets no coordinate file and no index row: an empty loop
-            # is not a particle table RELION can import. The manifest still lists the run
-            # with n_picks = 0, so the absence is recorded rather than implied.
+    from copick.util.formats import build_relion_star_tables, write_relion_import_bundle, write_star_particles
+
+    copick_layout = _copick_layout(layout)
+    runs = {}
+    for name, (pos_a, mats) in arrays_by_run.items():
+        pos = np.asarray(pos_a, dtype=float).reshape(-1, 3)
+        if not len(pos):
             continue
-        path = coord_dir / f"{run}.star"
-        starfile.write({"particles": table}, path, overwrite=True)
-        files[run] = str(path)
-    index = pd.DataFrame({"rlnTomoName": list(files), "rlnTomoImportParticleFile": list(files.values())})
-    index_path = out_dir / PARTICLES_STAR
-    starfile.write({INDEX_BLOCK: index}, index_path, overwrite=True)
-    return index_path, files
-
-
-def write_particles_star(
-    path: Path, particles: pd.DataFrame, *, layout: str, tilt_series_pixel_size_a: float | None = None
-) -> Path:
-    """The flat ``relion5`` file: ``data_optics`` + ``data_particles``.
-
-    ``tilt_series_pixel_size_a`` is the tilt-image sampling for the optics block; it is
-    **not** the tomogram voxel size and is omitted when unknown. For ``import_centered``
-    use :func:`write_import_bundle` (an index is not a particle table)."""
-    if layout != LAYOUT_RELION5:
-        raise ValueError(f"write_particles_star writes the {LAYOUT_RELION5!r} layout; {layout!r} is a bundle")
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    starfile.write({"optics": optics_table(tilt_series_pixel_size_a=tilt_series_pixel_size_a), "particles": particles}, path, overwrite=True)
-    return path
+        transforms = np.tile(np.eye(4), (len(pos), 1, 1))
+        if mats is not None:
+            transforms[:, :3, :3] = np.asarray(mats, dtype=float).reshape(-1, 3, 3)
+        runs[name] = (pos, transforms)
+    known_tilt = {name: float(v) for name, v in tilt_series_pixel_sizes.items() if name in runs and v is not None}
+    particles, optics = build_relion_star_tables(
+        runs,
+        tomogram_centers={name: geometry_by_run[name].center_a for name in runs},
+        tilt_series_pixel_size=known_tilt if copick_layout == "particles" else None,
+        include_optics=copick_layout == "particles",
+        coordinates="centered",
+    )
+    path = particles_path(out_dir)
+    if copick_layout == "import":
+        return write_relion_import_bundle(path, particles)
+    if not runs:
+        raise LookupError("no picks to export")
+    os.makedirs(str(out_dir), exist_ok=True)
+    write_star_particles(path, particles, optics)
+    return path, {}
 
 
 # ---- readers ------------------------------------------------------------------------
@@ -194,60 +205,63 @@ def map_runs(project_runs: list[str], portal_runs: list[str], *, prefix: str = "
 # ---- exports ------------------------------------------------------------------------
 
 
-def _finish_manifest(manifest: dict, *, out_dir: Path, layout: str, tables_by_run: dict[str, pd.DataFrame],
-                     tilt_px_a: float | None, oriented_all: bool) -> dict:
-    out_dir = Path(out_dir)
+def _finish_manifest(manifest: dict, *, out_dir: Path, layout: str, files: dict[str, str], orientations: str) -> dict:
+    """The manifest's account of what copick wrote: layout, index or flat table, the per-run coordinate files, totals."""
+    if orientations not in ORIENTATIONS:
+        raise ValueError(f"orientations must be one of {ORIENTATIONS}, not {orientations!r}")
     if layout == LAYOUT_IMPORT_CENTERED:
-        index_path, files = write_import_bundle(out_dir, tables_by_run)
-        manifest["particles_star"] = index_path.name
+        manifest["particles_star"] = PARTICLES_STAR
         manifest["particles_star_kind"] = "index"
-        manifest["coordinate_files"] = files
-        empty = sorted(run for run, table in tables_by_run.items() if len(table) == 0)
+        manifest["coordinate_files"] = dict(files)
+        empty = sorted(run for run, info in manifest["runs"].items() if not info.get("n_picks"))
         if empty:
             manifest["notes"].append("runs with no picks have no coordinate file and no index row: " + ", ".join(empty))
     else:
-        particles = pd.concat(tables_by_run.values(), ignore_index=True) if tables_by_run else pd.DataFrame()
-        write_particles_star(out_dir / PARTICLES_STAR, particles, layout=layout, tilt_series_pixel_size_a=tilt_px_a)
         manifest["particles_star"] = PARTICLES_STAR
         manifest["particles_star_kind"] = "particles"
         manifest["coordinate_files"] = {}
     manifest["layout"] = layout
-    manifest["orientations"] = "measured" if oriented_all else "identity_initialisation"
-    n_picks = int(sum(len(t) for t in tables_by_run.values()))
+    manifest["orientations"] = orientations
+    manifest["star_writer"] = _star_writer()
     manifest["totals"] = {
         "n_runs": len(manifest["runs"]),
-        "n_picks": n_picks,
+        "n_picks": int(sum(int(r.get("n_picks", 0)) for r in manifest["runs"].values())),
         "n_outside_volume": int(sum(r.get("n_outside_volume", 0) for r in manifest["runs"].values())),
     }
-    write_manifest(out_dir / PICKS_MANIFEST, manifest)
+    write_manifest(Path(out_dir) / PICKS_MANIFEST, manifest)
     return manifest
 
 
-def _single_tilt_pixel_size(per_run: dict, layout: str, manifest: dict) -> float | None:
-    """One tilt-series sampling for the common optics row, or None (column omitted).
+def _star_writer() -> dict:
+    """Which copick wrote the STAR files (the one implementation of the RELION conventions they follow)."""
+    from importlib.metadata import PackageNotFoundError, version
 
-    A single optics row describes every particle in the flat file, so a value is written
-    only when **every** included run states the same measurement: a run without a
-    tilt-series record must not inherit another run's value, and mixed samplings would
-    need one optics group per sampling, which is refused for ``relion5`` rather than
-    papered over with one guessed row. The index bundle has no optics block; the value is
-    still recorded per run in the manifest.
+    try:
+        return {"package": "copick", "version": version("copick")}
+    except PackageNotFoundError:
+        return {"package": "copick", "version": None}
+
+
+def _tilt_pixel_size_record(per_run: dict, layout: str, manifest: dict) -> float | None:
+    """The tilt-series sampling the manifest states for the whole export: the one value every run states, else None.
+
+    copick writes one optics group per run, so runs may differ; the ``relion5`` optics table is written only when
+    every run states a value (a run without a tilt-series record must not borrow another run's). The index bundle has
+    no optics table; every run's value is recorded in the manifest either way.
     """
     unknown = sorted(run for run, value in per_run.items() if value is None)
     known = {value for value in per_run.values() if value is not None}
     if unknown:
         manifest["notes"].append(
-            "rlnTomoTiltSeriesPixelSize omitted from the optics block: no tilt-series record for "
-            + ", ".join(unknown)
-            + (f" (the other runs state {sorted(known)})" if known else "")
+            ("rlnTomoTiltSeriesPixelSize unknown for " if layout == LAYOUT_IMPORT_CENTERED
+             else "no optics table (RELION builds it from tomograms.star): no tilt-series record for ")
+            + ", ".join(unknown) + (f" (the other runs state {sorted(known)})" if known else "")
         )
         return None
     if len(known) > 1:
-        if layout == LAYOUT_RELION5:
-            raise ValueError(f"runs have different tilt-series pixel sizes {sorted(known)}; one optics group cannot describe them")
-        manifest["notes"].append(f"runs have different tilt-series pixel sizes: {sorted(known)}")
+        manifest["notes"].append(f"runs have different tilt-series pixel sizes {sorted(known)}; one optics group per run")
         return None
-    return known.pop()
+    return known.pop() if known else None
 
 
 def export_portal_picks(
@@ -302,7 +316,8 @@ def export_portal_picks(
         raise FileNotFoundError(f"runs not found under {dataset_dir}: {missing}")
     manifest["run_mapping"] = dict(run_map)
 
-    tables_by_run: dict[str, pd.DataFrame] = {}
+    arrays_by_run: dict[str, tuple] = {}
+    geometry_by_run: dict[str, VolumeGeometry] = {}
     tilt_pixel_sizes: dict[str, float | None] = {}
     voxel_sizes: set[float] = set()
     oriented_all = True
@@ -321,7 +336,8 @@ def export_portal_picks(
         if mats is None:
             oriented_all = False
         # The STAR carries the PROJECT run name: that is what RELION joins on.
-        tables_by_run[project_run] = particles_table(project_run, pos_a, geometry, layout=layout, matrices=mats)
+        arrays_by_run[project_run] = (pos_a, mats)
+        geometry_by_run[project_run] = geometry
         voxel_sizes.add(geometry.voxel_a)
         tilt_pixel_sizes[project_run] = tilt_px
         picks_uri = None
@@ -342,17 +358,18 @@ def export_portal_picks(
             manifest["notes"].append(
                 f"{project_run}: annotation {ann.annotation_id} states object_count={ann.object_count} but the NDJSON has {pos_a.shape[0]} rows"
             )
-    if not tables_by_run:
+    if not arrays_by_run:
         raise LookupError(f"no runs with annotations under {dataset_dir}")
     if len(voxel_sizes) != 1:
         manifest["notes"].append(f"runs have different tomogram voxel sizes: {sorted(voxel_sizes)}")
-    tilt_px_a = _single_tilt_pixel_size(tilt_pixel_sizes, layout, manifest)
     manifest["tomogram_voxel_size_a"] = voxel_sizes.pop() if len(voxel_sizes) == 1 else None
-    manifest["tilt_series_pixel_size_a"] = tilt_px_a
+    manifest["tilt_series_pixel_size_a"] = _tilt_pixel_size_record(tilt_pixel_sizes, layout, manifest)
     if copick_root is None:
         manifest["notes"].append("picks were not stored in a copick project (storage not requested)")
-    return _finish_manifest(manifest, out_dir=out_dir, layout=layout, tables_by_run=tables_by_run,
-                            tilt_px_a=tilt_px_a, oriented_all=oriented_all)
+    _, files = write_array_tables(out_dir, arrays_by_run, geometry_by_run, layout=layout,
+                                  tilt_series_pixel_sizes=tilt_pixel_sizes)
+    return _finish_manifest(manifest, out_dir=out_dir, layout=layout, files=files,
+                            orientations="measured" if oriented_all else "identity_initialisation")
 
 
 def export_selection_picks(
@@ -428,7 +445,8 @@ def export_selection_picks(
         if unused:
             raise LookupError(f"pinned annotation files {unused} are not on any selected run's alignment and voxel spacing")
 
-    tables_by_run: dict[str, pd.DataFrame] = {}
+    arrays_by_run: dict[str, tuple] = {}
+    geometry_by_run: dict[str, VolumeGeometry] = {}
     tilt_pixel_sizes: dict[str, float | None] = {}
     oriented_all = True
     for name, files in chosen.items():
@@ -445,7 +463,8 @@ def export_selection_picks(
         mats = np.concatenate(orientations) if oriented else None
         oriented_all = oriented_all and oriented
         inside = within_volume(pos_a, geometry)
-        tables_by_run[name] = particles_table(name, pos_a, geometry, layout=layout, matrices=mats)
+        arrays_by_run[name] = (pos_a, mats)
+        geometry_by_run[name] = geometry
         tilt_pixel_sizes[name] = float(record["tiltseries_pixel_size"])
         picks_uri = None
         if copick_root is not None and len(pos_a):
@@ -468,15 +487,16 @@ def export_selection_picks(
         }
         if len(files) > 1:
             manifest["notes"].append(f"{name}: {len(files)} pinned annotation files merged; duplicates are not removed")
-    if not any(len(t) for t in tables_by_run.values()):
+    if not any(len(pos) for pos, _ in arrays_by_run.values()):
         raise LookupError("no picks in any selected run")
     manifest["tomogram_voxel_size_a"] = _consistent_value(selection_io.geometry(r).voxel_a for r in records.values())
-    tilt_px_a = _single_tilt_pixel_size(tilt_pixel_sizes, layout, manifest)
-    manifest["tilt_series_pixel_size_a"] = tilt_px_a
+    manifest["tilt_series_pixel_size_a"] = _tilt_pixel_size_record(tilt_pixel_sizes, layout, manifest)
     if copick_root is None:
         manifest["notes"].append("picks were not stored in a copick project (storage not requested)")
-    return _finish_manifest(manifest, out_dir=out_dir, layout=layout, tables_by_run=tables_by_run,
-                            tilt_px_a=tilt_px_a, oriented_all=oriented_all)
+    _, written = write_array_tables(out_dir, arrays_by_run, geometry_by_run, layout=layout,
+                                    tilt_series_pixel_sizes=tilt_pixel_sizes)
+    return _finish_manifest(manifest, out_dir=out_dir, layout=layout, files=written,
+                            orientations="measured" if oriented_all else "identity_initialisation")
 
 
 def _consistent_value(values) -> float | None:
@@ -520,30 +540,43 @@ def export_copick_picks(
     runs: list[str] | None,
     session_id: str,
     job_type: str,
-    orientations: str = "identity_initialisation",
     source: dict | None = None,
-    tilt_series_pixel_size_a: float | None = None,
+    tilt_series_pixel_size_a: float | dict | None = None,
+    filaments_uri: str | None = None,
 ) -> dict:
-    """copick picks (``object:user/session``) -> ``particles.star`` (+ companions) + manifest.
+    """copick picks (``object:user/session``) -> ``particles.star`` (+ companions) by copick's export, + the manifest.
 
-    Geometry per run comes from the copick tomogram ``tomo_type@voxel_a`` actually
-    picked (zarr shape is zyx; converted to xyz here, explicitly). The tilt-series
-    sampling for the ``relion5`` optics block is not knowable from copick; the caller
-    passes it from the project manifest (portal tilt-series record or the RELION
-    ``tomograms.star``) or it is omitted.
+    Every run's center comes from the copick tomogram ``tomo_type@voxel_a`` actually picked (copick's ``tomo_type``
+    selection; a run without that tomogram is skipped with a note). The tilt-series sampling of the ``relion5`` optics
+    table is not knowable from copick; the caller passes it per run (the project manifest's portal tilt-series record
+    or the RELION ``tomograms.star``), or it is omitted.
+
+    ``filaments_uri`` makes this a filament export: copick writes RELION's filament columns, and each filament's
+    ``rlnAnglePsiFlipRatio`` from the polarity those Filaments state (0 where known, 0.5 elsewhere). copick refuses a
+    pick whose filament is not in them and a run whose Filaments are absent (a lineage error); the job fails with
+    both ends of the lineage named. Otherwise
+    the angles are the picks' own rotations: ``measured`` when any is not the identity, else an
+    ``identity_initialisation`` (0, 0, 0).
     """
     import copick  # lazy: only the picking environment has it
+    from copick.ops.export import export_relion_particles
 
-    if layout not in LAYOUTS:
-        raise ValueError(f"unknown STAR layout {layout!r}")
+    copick_layout = _copick_layout(layout)
     root = copick.from_file(str(config))
     object_name, rest = picks_uri.split(":", 1)
     user_id, pick_session = rest.split("/", 1)
+    filament = filaments_uri is not None
     out_dir = Path(out_dir)
     manifest = new_manifest("picks", job_type=job_type, session_id=session_id, user_id=user_id, config=str(config))
     manifest["object"] = object_name
     manifest["source"] = source or {"kind": "copick-picks", "picks_uri": picks_uri}
-    tables_by_run: dict[str, pd.DataFrame] = {}
+    if isinstance(tilt_series_pixel_size_a, dict):
+        tilt_by_run = dict(tilt_series_pixel_size_a)
+    else:
+        tilt_by_run = {run.name: tilt_series_pixel_size_a for run in root.runs}
+
+    included: list[str] = []
+    rotations: list[np.ndarray] = []
     for run in root.runs:
         if runs and run.name not in runs:
             continue
@@ -554,28 +587,76 @@ def export_copick_picks(
             continue
         shape_zyx = _zarr_shape_zyx(tomo)
         geometry = VolumeGeometry(dims_xyz=(shape_zyx[2], shape_zyx[1], shape_zyx[0]), voxel_a=float(voxel_a))
-        picks = run.get_picks(object_name=object_name, user_id=user_id, session_id=pick_session)
-        if not picks:
-            manifest["runs"][run.name] = {"n_picks": 0, "n_outside_volume": 0, "picks_uri": picks_uri, "geometry": geometry.as_dict()}
-            continue
-        positions, transforms = picks[0].numpy()
-        pos_a = np.asarray(positions, dtype=float).reshape(-1, 3)
-        mats = np.asarray(transforms, dtype=float)[:, :3, :3] if orientations == "measured" else None
-        tables_by_run[run.name] = particles_table(run.name, pos_a, geometry, layout=layout, matrices=mats)
-        manifest["runs"][run.name] = {
-            "n_picks": int(pos_a.shape[0]),
-            "n_outside_volume": int((~within_volume(pos_a, geometry)).sum()),
-            "oriented": mats is not None,
-            "picks_uri": picks_uri,
-            "geometry": geometry.as_dict(),
-            "tilt_series_pixel_size_a": tilt_series_pixel_size_a,
-        }
-    if tilt_series_pixel_size_a is None:
-        manifest["notes"].append("tilt-series pixel size not supplied; rlnTomoTiltSeriesPixelSize omitted from the optics block")
+        record = {"n_picks": 0, "n_outside_volume": 0, "oriented": False, "picks_uri": picks_uri,
+                  "geometry": geometry.as_dict(), "tilt_series_pixel_size_a": tilt_by_run.get(run.name)}
+        positions, transforms, ids = _read_picks(run, object_name, user_id, pick_session)
+        if len(positions):
+            # The particle center copick exports: location + the transform's translation.
+            full = positions + transforms[:, :3, 3]
+            not_identity = ~np.all(np.isclose(transforms[:, :3, :3], np.eye(3), atol=1e-6), axis=(1, 2))
+            rotations.append(not_identity)
+            record.update(n_picks=int(len(full)), n_outside_volume=int((~within_volume(full, geometry)).sum()),
+                          oriented=bool(not_identity.any()))
+            if filament:
+                record["n_filaments"] = int(len(set(ids.tolist())))
+        manifest["runs"][run.name] = record
+        included.append(run.name)
+
+    try:
+        result = export_relion_particles(
+            root, picks_uri, particles_path(out_dir),
+            voxel_spacing=float(voxel_a), run_names=included, layout=copick_layout, tomo_type=tomo_type,
+            tilt_series_pixel_size={r: v for r, v in tilt_by_run.items() if r in included and v is not None}
+            if copick_layout == "particles" else None,
+            coordinates="centered", include_optics=True, filament_columns="on" if filament else "off",
+            polarity_from_filaments=filament, filaments_uri=filaments_uri, allow_empty=True,
+        )
+    except ValueError as exc:
+        if not filament:
+            raise
+        # copick refuses a run without the named Filaments and a pick whose filament is not in them; say which
+        # lineage the job expected, so the refusal names both ends of it.
+        raise ValueError(f"filament export of {picks_uri} with polarity from {filaments_uri}: {exc}") from exc
+    for name in included:
+        if int(result.rows.get(name, 0)) != manifest["runs"][name]["n_picks"]:
+            raise RuntimeError(f"{name}: copick exported {result.rows.get(name, 0)} rows for {picks_uri} but the pick set "
+                               f"holds {manifest['runs'][name]['n_picks']}; the STAR and the manifest would disagree")
+    if filament:
+        _record_polarity(manifest, result, filaments_uri)
+        orientations = "filament_frame"
+    else:
+        orientations = "measured" if any(r.any() for r in rotations) else "identity_initialisation"
     manifest["tomogram_voxel_size_a"] = float(voxel_a)
-    manifest["tilt_series_pixel_size_a"] = tilt_series_pixel_size_a
-    return _finish_manifest(manifest, out_dir=out_dir, layout=layout, tables_by_run=tables_by_run,
-                            tilt_px_a=tilt_series_pixel_size_a, oriented_all=(orientations == "measured"))
+    manifest["tilt_series_pixel_size_a"] = _tilt_pixel_size_record({r: tilt_by_run.get(r) for r in included}, layout, manifest)
+    return _finish_manifest(manifest, out_dir=out_dir, layout=layout, files=result.files, orientations=orientations)
+
+
+def _read_picks(run, object_name: str, user_id: str, session_id: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Locations, transforms and instance IDs of a run's pick set(s) under one exact URI, concatenated in copick's order."""
+    sets = run.get_picks(object_name=object_name, user_id=user_id, session_id=session_id)
+    positions, transforms, ids = [np.zeros((0, 3))], [np.zeros((0, 4, 4))], [np.zeros(0, dtype=np.int64)]
+    for picks in sets:
+        pos, trans = picks.numpy()
+        if not len(pos):
+            continue
+        positions.append(np.asarray(pos, dtype=float).reshape(-1, 3))
+        transforms.append(np.asarray(trans, dtype=float).reshape(-1, 4, 4))
+        ids.append(np.asarray(picks.instance_ids(), dtype=np.int64))
+    return np.concatenate(positions), np.concatenate(transforms), np.concatenate(ids)
+
+
+def _record_polarity(manifest: dict, result, filaments_uri: str) -> None:
+    """Per run, how copick resolved each filament's polarity: the Filaments read, and how many of the run's filaments
+    have a known or an unknown polarity (copick itself refuses a missing source and a filament ID not in it)."""
+    for name, polarity in result.polarity.items():
+        info = manifest["runs"].setdefault(name, {})
+        info["polarity"] = {"source": polarity.source, "known": int(polarity.known), "unknown": int(polarity.unknown)}
+    manifest["filaments"] = {
+        "filaments_uri": filaments_uri,
+        "n_filaments": int(sum(r.get("n_filaments", 0) for r in manifest["runs"].values())),
+        "n_polarity_known": int(sum(p.known for p in result.polarity.values())),
+        "n_polarity_unknown": int(sum(p.unknown for p in result.polarity.values())),
+    }
 
 
 def _zarr_shape_zyx(tomo) -> tuple[int, int, int]:
