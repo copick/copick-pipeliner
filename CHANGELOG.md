@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0](https://github.com/copick/copick-pipeliner/compare/copick-pipeliner-v0.1.15...copick-pipeliner-v0.2.0) (2026-10-16)
+
+
+### ✨ Features
+
+* filament segmentation, tracing and picking jobs; STAR files from copick's export ([#7](https://github.com/copick/copick-pipeliner/issues/7)) ([7823d77](https://github.com/copick/copick-pipeliner/commit/7823d774b705fa74e0ad2c99c90bdcccb850eb2f))
+* run easymode through copick-easymode's own multi-GPU workers ([#8](https://github.com/copick/copick-pipeliner/issues/8)) ([be65617](https://github.com/copick/copick-pipeliner/commit/be65617a633f2499a1fbe7124daf0c681cea3036))
+
 ## [0.1.15](https://github.com/copick/copick-pipeliner/compare/copick-pipeliner-v0.1.14...copick-pipeliner-v0.1.15) (2026-10-06)
 
 
