@@ -10,7 +10,12 @@ is no default spacing, as there is none in copick-utils -- and exports the picks
 copick's own RELION export: filament IDs as ``rlnHelicalTubeID``, track lengths, the filament frame in
 ``rlnTomoSubtomogram*``, and ``rlnAnglePsiFlipRatio`` per filament from the traced Filaments' polarity.
 
-Both bind their input by registered output node (``ProcessData`` with the ``copick.manifest.segmentation`` /
+``copick.filaments.polarity`` (CPU) runs copick-helix's ``helix-polarity`` on a trace's Filaments: the polarity of each
+microtubule from its own helical signal, the lattice registration of every segment, a reference map built from the data,
+and dense lattice-registered picks. Its ``particles.star`` carries each pick's registered pose as its angles, one
+``rlnRandomSubset`` per whole filament and the polarity per filament; ``reference.mrc`` is the reference.
+
+All bind their input by registered output node (``ProcessData`` with the ``copick.manifest.segmentation`` /
 ``copick.manifest.filaments`` keywords), never by a path convention.
 """
 
@@ -23,16 +28,20 @@ from pipeliner.job_options import (
     InputNodeJobOption,
     IntJobOption,
     JobOptionCondition,
+    JobOptionValidationResult,
     MultipleChoiceJobOption,
     StringJobOption,
 )
-from pipeliner.nodes import NODE_PROCESSDATA
+from pipeliner.nodes import NODE_DENSITYMAP, NODE_PROCESSDATA
+
+from copick_pipeliner.tools.external import helix_polarity_family
 
 from ._common import CopickJobBase, opt
 from .segment import SEGMENTATION_KWDS
 
 FILAMENTS_MANIFEST = "filaments.json"
 FILAMENTS_KWDS = ["copick", "manifest", "filaments"]
+REFERENCE_NODE = "reference.mrc"
 
 #: The trace's numeric options: joboption -> (seg2fil option, unit, help). Units are fixed (Angstrom, cubic
 #: Angstrom), so a joboption's name says what its number means.
@@ -195,6 +204,125 @@ class CopickFilamentsPicksJob(CopickJobBase):
         args += ["--roll", jo["roll"].get_string()]
         if jo["roll"].get_string() == "random":
             args += opt("--seed", jo["seed"].get_string())
+        args += self.runs_args()
+        args += ["--layout", jo["star_layout"].get_string()]
+        return [self.tool_command(args)]
+
+
+class CopickFilamentsPolarityJob(CopickJobBase):
+    PROCESS_NAME = "copick.filaments.polarity"
+    OUT_DIR = "AutoPick"
+    TOOL_VERB = "filament-polarity"
+    DISPLAY_NAME = "Filament polarity (copick-helix)"
+    SHORT_DESC = ("Microtubule polarity, lattice registration and a reference map from traced filaments, and "
+                  "lattice-registered picks with whole-filament half sets.")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.add_config_input()
+        self.joboptions["in_filaments"] = InputNodeJobOption(
+            label="Traced filaments (filaments.json):",
+            node_type=NODE_PROCESSDATA,
+            node_kwds=list(FILAMENTS_KWDS),
+            pattern=FileDescription("filaments.json", [".json"]),
+            default_value="",
+            help_text="The filaments.json of a copick.filaments.trace job, of an object the project declares a polar "
+                      "filament (name:radius:filament:polar).",
+            is_required=True,
+        )
+        self.joboptions["family"] = StringJobOption(
+            label="Filament family:",
+            default_value="microtubule",
+            help_text="copick-helix family, cylindrical route only: microtubule (13 protofilaments, 3-start) or "
+                      "microtubule_N_S. actin (term route, not validated here) and intermediate_filament (recentering "
+                      "only, no polarity) are refused.",
+            is_required=True,
+        )
+        self.joboptions["tomo_type"] = StringJobOption(
+            label="Tomogram type (empty = the trace's):",
+            default_value="",
+            help_text="copick tomogram type the helical signal is read from. It should be CTF-corrected (e.g. a "
+                      "deconvolved or phase-flipped reconstruction); empty reads the tomogram the trace was made on.",
+            is_required=False,
+        )
+        self.joboptions["voxel_size"] = FloatJobOption(
+            label="Tomogram voxel size (A, 0 = the trace's):",
+            default_value=0.0,
+            hard_min=0.0,
+            step_value=0.01,
+            help_text="Voxel size of that tomogram; 0 takes the trace's.",
+            is_required=False,
+        )
+        for name, end in (("tilt_min_deg", "Lowest"), ("tilt_max_deg", "Highest")):
+            self.joboptions[name] = FloatJobOption(
+                label=f"{end} tilt angle (deg):",
+                default_value=None,
+                hard_min=-90.0,
+                hard_max=90.0,
+                help_text="The tilt range of the tilt series, which sets the missing wedge copick-helix models. "
+                          "Required, with no default: it is a property of the data.",
+                is_required=True,
+            )
+        self.joboptions["tilt_axis"] = MultipleChoiceJobOption(
+            label="Tilt axis (tomogram axis):",
+            choices=["y", "x"],
+            default_value="y",
+            help_text="The tomogram axis the specimen was tilted about.",
+        )
+        self.joboptions["min_length_a"] = FloatJobOption(
+            label="Minimum filament length (A; empty = copick-helix default):",
+            default_value=None,
+            hard_min=0.0,
+            help_text="Shorter filaments are not analyzed. Empty: copick-helix's default, two segments of the family.",
+            is_required=False,
+        )
+        self.joboptions["seeds_only"] = BooleanJobOption(
+            label="Picks for seed filaments only?",
+            default_value=True,
+            help_text="Yes: dense picks only on seeds, the filaments both methods call confidently and alike (polarity "
+                      "known). No: on every analyzed filament, with flip ratio 0.5 where the polarity is not known.",
+        )
+        self.joboptions["every"] = IntJobOption(
+            label="Every n-th lattice point:",
+            default_value=1,
+            hard_min=1,
+            help_text="Dense picks at every n-th lattice point along each filament (1 = every tubulin dimer).",
+        )
+        self.add_runs_option()
+        self.add_layout_option()
+        self.get_runtab_options(threads=True)
+
+    def create_output_nodes(self) -> None:
+        self.add_picks_outputs("polarity")
+        self.add_output_node(REFERENCE_NODE, NODE_DENSITYMAP, ["copick", "helix", "reference"])
+
+    def additional_joboption_validation(self):
+        jo = self.joboptions
+        errors = []
+        try:
+            helix_polarity_family(jo["family"].get_string())
+        except ValueError as exc:
+            errors.append(JobOptionValidationResult("error", [jo["family"]], str(exc)))
+        lo, hi = jo["tilt_min_deg"].value, jo["tilt_max_deg"].value
+        if lo is not None and hi is not None and not float(lo) < float(hi):
+            errors.append(JobOptionValidationResult("error", [jo["tilt_min_deg"], jo["tilt_max_deg"]],
+                                                    "The lowest tilt must be below the highest."))
+        return errors
+
+    def get_commands(self):
+        jo = self.joboptions
+        args = self.common_args()
+        args += ["--config", jo["copick_config"].get_string()]
+        args += ["--in-filaments", jo["in_filaments"].get_string()]
+        args += ["--family", jo["family"].get_string()]
+        args += opt("--tomo-type", jo["tomo_type"].get_string())
+        if jo["voxel_size"].value:
+            args += ["--voxel-size", jo["voxel_size"].get_string()]
+        args += ["--tilt-min", jo["tilt_min_deg"].get_string(), "--tilt-max", jo["tilt_max_deg"].get_string()]
+        args += ["--tilt-axis", jo["tilt_axis"].get_string()]
+        args += opt("--min-length", jo["min_length_a"].get_string())
+        args += ["--seeds-only" if jo["seeds_only"].get_boolean() else "--all-filaments"]
+        args += ["--every", jo["every"].get_string()]
         args += self.runs_args()
         args += ["--layout", jo["star_layout"].get_string()]
         return [self.tool_command(args)]

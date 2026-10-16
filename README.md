@@ -16,6 +16,7 @@ like any RELION job.
 | `copick.segment.easymode` | copick-easymode segmentation only (the same inference step as `copick.easymode`) → `segmentations.json` | GPU (TensorFlow) |
 | `copick.filaments.trace` | copick-utils `seg2fil` on that segmentation → Filaments + instance segmentation → `filaments.json` | CPU |
 | `copick.filaments.picks` | copick-utils `fil2picks` at a stated spacing → `particles.star` with RELION's filament columns | CPU |
+| `copick.filaments.polarity` | copick-helix `helix-polarity` on traced microtubules → polarity calls, `reference.mrc` and lattice-registered picks → `particles.star` | CPU |
 
 ## Two halves, two environments
 
@@ -52,8 +53,9 @@ like any RELION job.
 * **Outputs are products**: `particles.star` + `picks_manifest.json` (or `segmentations.json`)
   are registered nodes; no job re-emits its input config. The manifest carries source
   provenance (annotation/deposition ids, tomogram id), per-run geometry (dims, voxel size,
-  origin), counts, URIs, and whether orientations are measured, an identity initialization or the
-  filament frame (`orientations`: `measured`, `identity_initialisation`, `filament_frame`).
+  origin), counts, URIs, and whether orientations are measured, an identity initialization, the
+  filament frame or lattice-registered poses (`orientations`: `measured`, `identity_initialisation`,
+  `filament_frame`, `registered`).
 * **Objects** are registered once by `copick.project` (`name:radiusA`, radius 0 = segmentation-only);
   every later command runs with `--no-add-objects`. `name:radiusA:filament[:polar|:apolar]` declares a
   filament the way copick stores it (`metadata.copick.filament`, copick's `FilamentSpec`), with the tube
@@ -78,7 +80,40 @@ binding the previous job's registered output node (`ProcessData` `copick.manifes
   filament columns with `rlnAnglePsiFlipRatio` per filament from the trace's Filaments (0 where the
   polarity is known, 0.5 elsewhere); a pick whose filament is not in them fails the job as a lineage
   error. `copick.boundary` keeps filament IDs, order and frames (`picksin`) and exports the same way,
-  with polarity from the Filaments its upstream manifest names.
+  with polarity from the Filaments its upstream manifest names. Both write `rlnRandomSubset` per whole
+  filament (copick's `half_sets="filament"`), so no filament contributes to both half-maps.
+
+### Polarity (copick-helix)
+
+`copick.filaments.polarity` binds a trace's `filaments.json`, like the picks job, and runs
+[copick-helix](https://github.com/copick/copick-helix)'s `copick process helix-polarity` on its Filaments. copick-helix
+is a `copick process` plugin: install it where copick runs
+(`pip install "copick-helix @ git+https://github.com/copick/copick-helix"`); the job checks that
+`copick process helix-polarity --help` works and fails with "copick-helix is not installed in the copick environment"
+otherwise.
+
+* Only the cylindrical route: `family` is `microtubule` (13_3) or `microtubule_N_S`. actin (term route, not validated
+  here) and intermediate_filament (recentering only, no polarity call) are refused, and so is an object the project
+  does not declare a polar filament (`microtubule:120:filament:polar`).
+* `tilt_min_deg` / `tilt_max_deg` are required, with no default: the tilt range is the data's. `tilt_axis` is `y` or
+  `x`. `tomo_type` / `voxel_size` default to the trace's tomogram; the analysis should read a CTF-corrected one.
+  `min_length_a` empty keeps copick-helix's default (two segments). Both methods always run (`invariants,iterative`),
+  and `nr_threads` is copick-helix's `--workers`, bounded by the job's memory (one whole tomogram per worker).
+* copick-helix writes `<object>:helix/<job>` (the analyzed filaments, recentered and ordered minus → plus where the
+  polarity is known, plus one registration pick per segment) and the dense picks `<object>:helix-dense/<job>`, every
+  `every`-th lattice point, on seed filaments only unless `seeds_only` is No. Its tables stay in `<job>/helix/`
+  (`calls.tsv`, `summary.json`, `iterative_runs.tsv`); its reference map is copied to `<job>/reference.mrc`
+  (`DensityMap`, `copick.helix.reference`).
+* `particles.star` is copick's export of the dense picks with `filament_angles="pose"`: each pick's registered rotation
+  in `rlnAngle*`, no `rlnTomoSubtomogram*` or prior columns, tube IDs, track lengths, `rlnAnglePsiFlipRatio` from
+  copick-helix's Filaments (0 for a seed) and `rlnRandomSubset` per whole filament. `orientations` is `registered`;
+  `copick.boundary` downstream keeps the poses.
+* `picks_manifest.json` adds a `polarity` block: per run and in total, the filaments traced and analyzed, the calls
+  (minus / plus / uncertain), seeds and dense picks; the lattice gate (pooled enrichment per term, data and decoy),
+  the invariants and the iterative strength from `summary.json`; the reference's voxel size and box; argv and
+  versions. `star` is the STAR read back: its rows and its half sets.
+* The job fails, after writing the manifest, when the lattice is not detected or no filament is a seed; the error
+  names the gate's numbers.
 
 ## Portal-backed projects (no mirror)
 

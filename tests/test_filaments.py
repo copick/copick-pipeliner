@@ -33,7 +33,7 @@ FILAMENT_COLUMNS = {
     "rlnTomoName", "rlnCenteredCoordinateXAngst", "rlnCenteredCoordinateYAngst", "rlnCenteredCoordinateZAngst",
     "rlnTomoSubtomogramRot", "rlnTomoSubtomogramTilt", "rlnTomoSubtomogramPsi", "rlnAngleRot", "rlnAngleTilt",
     "rlnAnglePsi", "rlnAngleTiltPrior", "rlnAnglePsiPrior", "rlnHelicalTubeID", "rlnHelicalTrackLengthAngst",
-    "rlnAnglePsiFlipRatio",
+    "rlnAnglePsiFlipRatio", "rlnRandomSubset",
 }
 
 
@@ -243,7 +243,7 @@ def test_filament_picks_manifest_keeps_the_fields_apexagent_reads(chain):
     # The filament account: per run, every filament ID found in the trace's Filaments; one polarity known (r2, #1).
     assert picks["runs"]["r2"]["polarity"] == {"source": "microtubule:trace/job010", "known": 1, "unknown": 1}
     assert picks["filaments"] == {"filaments_uri": "microtubule:trace/job010", "n_filaments": 3,
-                                  "n_polarity_known": 1, "n_polarity_unknown": 2}
+                                  "n_polarity_known": 1, "n_polarity_unknown": 2, "angles": "frame", "half_sets": "filament"}
     assert picks["runs"]["r1"]["n_traced_filaments"] == 1 and picks["star_writer"]["package"] == "copick"
 
 
@@ -265,6 +265,8 @@ def test_the_import_layout_apexagent_binds_carries_uniform_filament_columns(chai
     assert len(table) == chain["picks"]["totals"]["n_picks"]
     assert np.allclose(table[["rlnAngleRot", "rlnAngleTilt", "rlnAnglePsi"]].to_numpy(float), [0.0, 90.0, 0.0])
     assert np.allclose(table[["rlnAngleTiltPrior", "rlnAnglePsiPrior"]].to_numpy(float), [90.0, 0.0])
+    # One half set per whole filament, so no filament contributes to both half-maps.
+    assert (table.groupby(["rlnTomoName", "rlnHelicalTubeID"])["rlnRandomSubset"].nunique() == 1).all()
 
 
 def test_polarity_is_per_filament_in_a_mixed_table(chain):

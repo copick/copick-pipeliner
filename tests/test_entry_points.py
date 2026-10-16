@@ -1,4 +1,4 @@
-"""The eight job types resolve through pipeliner's registry and produce sane commands."""
+"""The job types resolve through pipeliner's registry and produce sane commands."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pipeliner.nodes import NODE_PARAMSDATA, NODE_PARTICLEGROUPMETADATA, NODE_PR
 from copick_pipeliner.jobs._common import PICKS_MANIFEST, PARTICLES_NODE, session_id_for
 
 JOB_TYPES = ("copick.project", "copick.portalpicks", "copick.easymode", "copick.boundary", "copick.membrain",
-             "copick.segment.easymode", "copick.filaments.trace", "copick.filaments.picks")
+             "copick.segment.easymode", "copick.filaments.trace", "copick.filaments.picks", "copick.filaments.polarity")
 UNSAFE = set(";|&$`><\n")
 
 
@@ -33,13 +33,14 @@ def test_default_parameters_dict_is_introspectable(job_type):
     assert params["_rlnJobTypeLabel"] == job_type
 
 
-def test_registry_lists_all_eight():
+def test_registry_lists_them_all():
     names = {job.PROCESS_NAME for job in get_job_types("copick.")}
     assert set(JOB_TYPES) <= names
 
 
 def test_picking_jobs_register_star_and_manifest_nodes():
-    for job_type in ("copick.portalpicks", "copick.easymode", "copick.boundary", "copick.filaments.picks"):
+    for job_type in ("copick.portalpicks", "copick.easymode", "copick.boundary", "copick.filaments.picks",
+                     "copick.filaments.polarity"):
         job = new_job_of_type(job_type)
         job.output_dir = "AutoPick/job004/"
         job.create_output_nodes()
@@ -183,6 +184,14 @@ def test_the_filament_chain_binds_by_registered_node_types():
     boundary_in = new_job_of_type("copick.boundary").joboptions["in_picks"]
     assert boundary_in.node_type == NODE_PARTICLEGROUPMETADATA == picks[PARTICLES_NODE].toplevel_type
 
+    polarity = outputs("copick.filaments.polarity", "AutoPick/job012/")
+    assert polarity[PARTICLES_NODE].type == "ParticleGroupMetadata.star.copick.picks.polarity"
+    assert polarity[PICKS_MANIFEST].type == "ProcessData.json.copick.manifest.picks.polarity"
+    assert polarity["reference.mrc"].type == "DensityMap.mrc.copick.helix.reference"
+    polarity_in = new_job_of_type("copick.filaments.polarity").joboptions["in_filaments"]
+    assert polarity_in.node_type == NODE_PROCESSDATA and set(polarity_in.node_kwds) <= set(trace["filaments.json"].kwds)
+    assert boundary_in.node_type == polarity[PARTICLES_NODE].toplevel_type
+
 
 def test_segment_command(fake_executables):
     job = new_job_of_type("copick.segment.easymode")
@@ -237,6 +246,32 @@ def test_picks_command_requires_a_spacing_and_seeds_only_a_random_roll(fake_exec
     assert _argv(job)[_argv(job).index("--seed") + 1] == "3"
 
 
+def test_polarity_command_requires_the_tilt_range_and_refuses_other_families(fake_executables):
+    job = new_job_of_type("copick.filaments.polarity")
+    job.output_dir = "AutoPick/job012/"
+    job.joboptions["copick_config"].value = "Copick/job003/copick_config.json"
+    job.joboptions["in_filaments"].value = "Filaments/job010/filaments.json"
+    assert "use_gpu" not in job.joboptions and job.joboptions["nr_threads"].value == 1   # CPU only
+    with pytest.raises(ValueError, match="required but has no value"):   # the tilt range is the data's, no default
+        job.get_commands()
+    job.joboptions["tilt_min_deg"].value = -54.0
+    job.joboptions["tilt_max_deg"].value = 60.0
+    job.joboptions["nr_threads"].value = 8
+    argv = _argv(job)
+    assert argv[1] == "filament-polarity" and argv[argv.index("--session-id") + 1] == "job012"
+    assert argv[argv.index("--tilt-min") + 1] == "-54.0" and argv[argv.index("--tilt-max") + 1] == "60.0"
+    assert argv[argv.index("--family") + 1] == "microtubule" and argv[argv.index("--tilt-axis") + 1] == "y"
+    assert argv[argv.index("--threads") + 1] == "8" and argv[argv.index("--every") + 1] == "1"
+    assert "--seeds-only" in argv and argv[argv.index("--layout") + 1] == "import_centered"
+    for flag in ("--tomo-type", "--voxel-size", "--min-length"):
+        assert flag not in argv                                   # empty: the trace's tomogram, copick-helix's default
+    assert not job.additional_joboption_validation()
+    job.joboptions["family"].value = "actin"
+    job.joboptions["tilt_min_deg"].value = 60.0
+    messages = [r.message for r in job.additional_joboption_validation()]
+    assert any("term route" in m for m in messages) and any("lowest tilt" in m for m in messages)
+
+
 def test_job_definitions_load_without_copick(tmp_path):
     """The pipeliner control process (ApexAgent's venv) loads every job class; copick lives in the tools image."""
     import subprocess
@@ -248,7 +283,7 @@ def test_job_definitions_load_without_copick(tmp_path):
         "for m in ('project', 'portalpicks', 'easymode', 'boundary', 'membrain', 'segment', 'filaments'):\n"
         "    importlib.import_module('copick_pipeliner.jobs.' + m)\n"
         "from pipeliner.job_factory import new_job_of_type\n"
-        "for t in ('copick.segment.easymode', 'copick.filaments.trace', 'copick.filaments.picks'):\n"
+        "for t in ('copick.segment.easymode', 'copick.filaments.trace', 'copick.filaments.picks', 'copick.filaments.polarity'):\n"
         "    new_job_of_type(t)\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True, cwd=tmp_path)

@@ -102,3 +102,24 @@ def test_fil2picks_argv_requires_a_positive_spacing(fake_executables):
     for bad in (0, -1.0, float("nan")):
         with pytest.raises(ValueError, match="spacing"):
             external.fil2picks_argv(config="c", filaments_uri="f", picks_uri="p", spacing_a=bad)
+
+
+def test_helix_polarity_argv_states_the_route_inputs_and_outputs(fake_executables):
+    argv = external.helix_polarity_argv(
+        config="c.json", filaments_uri="microtubule:trace/job010", tomo_type="ctf", voxel_a=10.005, family="Microtubule-14-3",
+        tilt_range=(-54, 60), tilt_axis="y", work_dir="AutoPick/job012/helix", output_uri="microtubule:helix/job012",
+        picks_uri="microtubule:helix-dense/job012", every=2, seeds_only=False, min_length_a=1500, runs=["a", "b"], workers=4)
+    assert argv[0].endswith("copick") and argv[1:3] == ["process", "helix-polarity"]
+    assert argv[argv.index("-t") + 1] == "ctf@10.005" and argv[argv.index("--family") + 1] == "microtubule_14_3"
+    assert argv[argv.index("--tilt-range") + 1: argv.index("--tilt-range") + 3] == ["-54", "60"]
+    assert argv[argv.index("--methods") + 1] == "invariants,iterative" and "--all-filaments" in argv
+    assert argv[argv.index("--every") + 1] == "2" and argv[argv.index("--min-length") + 1] == "1500"
+    assert argv[argv.index("--workers") + 1] == "4" and argv.count("--run-names") == 2
+    for family, match in (("actin", "term route"), ("intermediate_filament", "recenters"), ("tubulin", "unknown family")):
+        with pytest.raises(ValueError, match=match):
+            external.helix_polarity_family(family)
+    common = dict(config="c", filaments_uri="f", tomo_type="t", voxel_a=10.0, family="microtubule", tilt_axis="y",
+                  work_dir="w", output_uri="o", picks_uri="p", every=1, seeds_only=True)
+    for bad in ((60, -60), (-95, 60), (0, float("nan"))):
+        with pytest.raises(ValueError, match="tilt range"):
+            external.helix_polarity_argv(tilt_range=bad, **common)

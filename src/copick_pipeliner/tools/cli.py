@@ -200,6 +200,34 @@ def filament_picks(out_dir, session_id, threads, runs, dry_run, config, in_filam
     click.echo(json.dumps(manifest.get("totals", manifest)))
 
 
+@main.command("filament-polarity")
+@_common
+@click.option("--config", type=click.Path(exists=True, dir_okay=False), required=True)
+@click.option("--in-filaments", type=click.Path(exists=True, dir_okay=False), required=True, help="filaments.json of a copick.filaments.trace job.")
+@click.option("--family", default="microtubule", help="copick-helix family on its cylindrical route: microtubule or microtubule_N_S.")
+@click.option("--tomo-type", default="", help="copick tomogram type to analyze (CTF-corrected); empty = the trace's.")
+@click.option("--voxel-size", type=float, default=None, help="Voxel size of that tomogram (A); unset or 0 = the trace's.")
+@click.option("--tilt-min", type=float, required=True, help="Lowest tilt of the tilt series (deg).")
+@click.option("--tilt-max", type=float, required=True, help="Highest tilt of the tilt series (deg).")
+@click.option("--tilt-axis", type=click.Choice(["y", "x"]), default="y", help="Tomogram axis of the tilt axis.")
+@click.option("--min-length", "min_length_a", type=float, default=None, help="Minimum filament length (A); unset keeps copick-helix's default (two segments).")
+@click.option("--seeds-only/--all-filaments", default=True, help="Dense picks for seed filaments only (polarity known).")
+@click.option("--every", type=int, default=1, help="Every n-th lattice point per dense pick.")
+@click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
+def filament_polarity(out_dir, session_id, threads, runs, dry_run, config, in_filaments, family, tomo_type, voxel_size, tilt_min, tilt_max, tilt_axis, min_length_a, seeds_only, every, layout):
+    """copick-helix polarity over a verified trace -> calls, reference.mrc, dense registered picks -> particles.star."""
+    try:
+        manifest = orchestrate.filament_polarity(
+            config=Path(config), out_dir=Path(out_dir), session_id=session_id, in_filaments=Path(in_filaments),
+            family=family, tomo_type=tomo_type or None, voxel_a=voxel_size or None, tilt_range=(tilt_min, tilt_max),
+            tilt_axis=tilt_axis, min_length_a=min_length_a, seeds_only=seeds_only, every=every, runs=_runs(runs),
+            layout=layout, threads=threads, runner=Runner(dry_run=dry_run),
+        )
+    except orchestrate.PolarityRefused as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps((manifest.get("polarity") or {}).get("totals", manifest)))
+
+
 @main.command()
 @_common
 @_gpu_options

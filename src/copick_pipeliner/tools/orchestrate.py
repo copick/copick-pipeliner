@@ -10,9 +10,11 @@ back results through copick. Everything scientific-tool-specific stays in
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from . import dedupe, easymode_inference, external, octopi_localization, portal_annotations as portal
 from .segmentation_reuse import (
@@ -1125,12 +1127,12 @@ SEG2FIL_OPTION_UNITS = {
 }
 
 
-def tool_versions() -> dict:
+def tool_versions(dists: tuple[str, ...] = ("copick", "copick-utils")) -> dict:
     """The copick packages this environment ran (the provenance of what a filament manifest describes)."""
     from importlib.metadata import PackageNotFoundError, version
 
     out = {}
-    for dist in ("copick", "copick-utils"):
+    for dist in dists:
         try:
             out[dist] = version(dist)
         except PackageNotFoundError:
@@ -1311,10 +1313,211 @@ def filament_picks(
     manifest = export_copick_picks(
         config=config, out_dir=out_dir, picks_uri=picks_uri, tomo_type=trace["tomo_type"], voxel_a=trace["voxel_size_a"],
         layout=layout, runs=selected, session_id=session_id, job_type="copick.filaments.picks", source=source,
-        tilt_series_pixel_size_a=_project_tilt_pixel_sizes(config), filaments_uri=trace["filaments_uri"])
+        tilt_series_pixel_size_a=_project_tilt_pixel_sizes(config), filaments_uri=trace["filaments_uri"],
+        half_sets="filament")
     for run, info in manifest["runs"].items():
         info["n_traced_filaments"] = (trace["runs"].get(run) or {}).get("n_filaments")
     write_manifest(Path(out_dir) / PICKS_MANIFEST, manifest)
+    return manifest
+
+
+# ---- copick.filaments.polarity ----------------------------------------------------------
+
+#: The copick users copick-helix writes under: the analyzed filaments and their registration picks share one URI
+#: (``-o``), the dense lattice-registered picks have their own (``--picks``).
+HELIX_USER = "helix"
+HELIX_DENSE_USER = "helix-dense"
+#: copick-helix's work directory inside the job directory, and the fixed name its reference map is copied to.
+HELIX_WORK_DIR = "helix"
+REFERENCE_MAP = "reference.mrc"
+#: Bytes per tomogram voxel one copick-helix worker holds while straightening a run: the float32 tomogram it reads and
+#: the normalized float32 copy (copick-helix ``io.read_tomogram`` and ``cli._straighten_run``), doubled for the
+#: straightened volumes and temporaries. An estimate from the code, not a measured peak.
+HELIX_BYTES_PER_VOXEL = 16
+
+
+class PolarityRefused(RuntimeError):
+    """copick-helix ran, but called no polarity this job can stand behind (no seed filament, or no lattice). Raised
+    after ``picks_manifest.json`` is written, so the numbers behind the refusal are on disk."""
+
+
+def require_polar_filament(config: Path, object_name: str, *, recorded_spec: dict | None = None, live: bool = True) -> None:
+    """Refuse an object that is not a filament declared polar: an apolar structure has no polarity to call, and an
+    unstated one has not been declared to have one. ``live`` reads the project's declaration; otherwise the trace
+    manifest's record of it (``recorded_spec``) is checked."""
+    if live:
+        spec = require_filament_object(config, object_name).filament
+        polar = spec.polar if spec is not None else None
+    else:
+        polar = (recorded_spec or {}).get("polar")
+    if polar is False:
+        raise ValueError(f"object {object_name!r} is declared an apolar filament in {config}: an apolar structure has "
+                         "no polarity to call")
+    if polar is not True:
+        raise ValueError(f"object {object_name!r} does not state its polarity in {config}; a polarity call needs it "
+                         f"declared polar ({object_name}:<tube radius A>:filament:polar)")
+
+
+def _helix_calls(path: Path, runs: list[str]) -> dict[str, dict]:
+    """Per run, copick-helix's calls.tsv counted: filaments analyzed, calls by kind, seeds. A filament is named
+    ``<run>_f<instance id>`` (copick-helix ``_straighten_run``); one naming no requested run is an error."""
+    table = pd.read_csv(path, sep="\t")
+    call_col = "call" if "call" in table else ("inv_call" if "inv_call" in table else "it_call")
+    out = {run: {"n_analyzed": 0, "calls": {"minus": 0, "plus": 0, "uncertain": 0}, "n_seeds": 0} for run in runs}
+    for row in table.itertuples(index=False):
+        name = str(row.filament)
+        run, sep, instance = name.rpartition("_f")
+        if not sep or run not in out or not instance.isdigit():
+            raise ValueError(f"{path}: filament {name!r} names none of the analyzed runs {sorted(out)}")
+        info = out[run]
+        info["n_analyzed"] += 1
+        call = str(getattr(row, call_col))
+        info["calls"][call] = info["calls"].get(call, 0) + 1
+        info["n_seeds"] += int(str(getattr(row, "seed", False)).strip().lower() == "true")
+    return out
+
+
+def _star_recount(out_dir: Path, expected: int) -> dict:
+    """The written ``particles.star`` read back: its rows and its whole-filament half sets (particles and filaments
+    per ``rlnRandomSubset``, and filaments found in both). A row count that disagrees with the manifest, or a filament
+    split between the halves, is an error: the STAR would not be what the manifest says."""
+    from .export_star import PARTICLES_STAR, read_particles_star
+
+    table = read_particles_star(Path(out_dir) / PARTICLES_STAR) if expected else pd.DataFrame()
+    if len(table) != expected:
+        raise RuntimeError(f"{out_dir}/particles.star holds {len(table)} rows; the manifest counts {expected}")
+    record = {"n_rows": int(len(table)), "half_sets": None}
+    if len(table) and "rlnRandomSubset" in table:
+        tube = table["rlnTomoName"].astype(str) + "#" + table["rlnHelicalTubeID"].astype(int).astype(str)
+        subsets = table["rlnRandomSubset"].astype(int)
+        split = int((tube.groupby(subsets.values).nunique().sum()) - tube.nunique())
+        if split:
+            raise RuntimeError(f"{out_dir}/particles.star splits {split} filaments between rlnRandomSubset 1 and 2")
+        record["half_sets"] = {
+            "by": "filament",
+            **{str(s): {"n_particles": int((subsets == s).sum()), "n_filaments": int(tube[subsets == s].nunique())}
+               for s in sorted(set(subsets))},
+        }
+    return record
+
+
+def filament_polarity(
+    *, config: Path, out_dir: Path, session_id: str, in_filaments: Path, family: str, tomo_type: str | None,
+    voxel_a: float | None, tilt_range: tuple[float, float], tilt_axis: str, min_length_a: float | None,
+    seeds_only: bool, every: int, runs: list[str] | None, layout: str, threads: int | None, runner: external.Runner,
+) -> dict:
+    """copick-helix's ``helix-polarity`` over a verified trace -> polarity calls, lattice registration, a reference map
+    and dense lattice-registered picks -> ``particles.star`` (each pick's registered pose as its angles, one half set
+    per whole filament, polarity per filament from copick-helix's Filaments) + ``reference.mrc`` + the manifest.
+
+    The trace (``validate_filaments_manifest``) must be of a filament declared polar. The tomogram is ``tomo_type@voxel_a``
+    (the trace's when empty/0); it should be CTF-corrected. Exits through ``PolarityRefused`` -- after the manifest is
+    written -- when the lattice is not detected or no filament is a seed."""
+    family = external.helix_polarity_family(family)
+    trace = validate_filaments_manifest(Path(in_filaments), config=config, runs=runs)
+    obj, selected = trace["object"], trace["selected_runs"]
+    require_polar_filament(config, obj, recorded_spec=trace.get("filament_spec"), live=not runner.dry_run)
+    tomo_type = tomo_type or trace["tomo_type"]
+    voxel_a = snap_voxel_size(config, voxel_a) if voxel_a else float(trace["voxel_size_a"])
+    if not runner.dry_run:
+        ok, detail = external.helix_available()
+        if not ok:
+            raise RuntimeError(f"copick-helix is not installed in the copick environment ({detail})")
+    out_dir = Path(out_dir)
+    work_dir = out_dir / HELIX_WORK_DIR
+    output_uri = external.seg_uri(obj, HELIX_USER, session_id)
+    picks_uri = external.seg_uri(obj, HELIX_DENSE_USER, session_id)
+    # Each worker straightens one run from its whole tomogram: bound the parallelism by memory, as for the trace.
+    workers, accounting = bounded_workers(threads, None if runner.dry_run else tomogram_voxels(config, tomo_type, voxel_a),
+                                          job_memory_limit_bytes(), bytes_per_voxel=HELIX_BYTES_PER_VOXEL)
+    argv = external.helix_polarity_argv(
+        config=str(config), filaments_uri=trace["filaments_uri"], tomo_type=tomo_type, voxel_a=voxel_a, family=family,
+        tilt_range=tilt_range, tilt_axis=tilt_axis, work_dir=str(work_dir), output_uri=output_uri, picks_uri=picks_uri,
+        every=every, seeds_only=seeds_only, min_length_a=min_length_a, runs=selected, workers=workers)
+    runner.run(argv)
+    if runner.dry_run:
+        return {"dry_run": True, "filaments_uri": output_uri, "picks_uri": picks_uri, "argv": argv}
+
+    summary = json.loads((work_dir / "summary.json").read_text())
+    calls = _helix_calls(work_dir / "calls.tsv", selected)
+    if not summary.get("reference_map"):
+        raise RuntimeError(f"{work_dir}/summary.json names no reference map; copick-helix made no iterative reference")
+    written = work_dir / Path(summary["reference_map"]).name
+    if not written.is_file():
+        raise RuntimeError(f"copick-helix's reference map {written} is missing")
+    shutil.copyfile(written, out_dir / REFERENCE_MAP)
+    geometry = volume_geometry(out_dir / REFERENCE_MAP)
+
+    source = {
+        "kind": "copick-helix",
+        "filaments_manifest": str(in_filaments),
+        "trace_filaments_uri": trace["filaments_uri"],
+        "trace_session": trace["session_id"],
+        "filaments_uri": output_uri,
+        "registration_picks_uri": output_uri,
+        "dense_picks_uri": picks_uri,
+        "tomogram": external.tomo_uri(tomo_type, voxel_a),
+        "tool": {"command": "copick process helix-polarity", "argv": argv,
+                 "versions": tool_versions(("copick", "copick-utils", "copick-helix")), "workers": accounting},
+    }
+    # The STAR's centers are the trace's tomogram's, as for copick.filaments.picks: the picks are positions in Angstrom,
+    # and both jobs' STAR files then share one frame whatever tomogram the analysis read.
+    manifest = export_copick_picks(
+        config=config, out_dir=out_dir, picks_uri=picks_uri, tomo_type=trace["tomo_type"], voxel_a=trace["voxel_size_a"],
+        layout=layout, runs=selected, session_id=session_id, job_type="copick.filaments.polarity", source=source,
+        tilt_series_pixel_size_a=_project_tilt_pixel_sizes(config), filaments_uri=output_uri,
+        filament_angles="pose", half_sets="filament")
+    per_run = {}
+    for run in selected:
+        per_run[run] = {"n_filaments_in": (trace["runs"].get(run) or {}).get("n_filaments"), **calls[run],
+                        "n_dense_picks": int((manifest["runs"].get(run) or {}).get("n_picks", 0))}
+    totals = {
+        "n_filaments_in": int(sum(r["n_filaments_in"] or 0 for r in per_run.values())),
+        "n_analyzed": int(sum(r["n_analyzed"] for r in per_run.values())),
+        "calls": {k: int(sum(r["calls"].get(k, 0) for r in per_run.values()))
+                  for k in sorted({k for r in per_run.values() for k in r["calls"]})},
+        "n_seeds": int(sum(r["n_seeds"] for r in per_run.values())),
+        "n_dense_picks": int(sum(r["n_dense_picks"] for r in per_run.values())),
+    }
+    gate = summary.get("lattice_gate") or {}
+    manifest["polarity"] = {
+        "family": family,
+        "family_resolved": summary.get("family"),
+        "methods": external.HELIX_METHODS.split(","),
+        "tomogram": external.tomo_uri(tomo_type, voxel_a),
+        "tilt_range_deg": [float(v) for v in tilt_range],
+        "tilt_axis": tilt_axis,
+        "min_length_a": min_length_a,
+        "seeds_only": bool(seeds_only),
+        "every": int(every),
+        "runs": per_run,
+        "totals": totals,
+        "lattice_gate": {"detected": gate.get("detected"), "terms": gate.get("terms")},
+        "invariants": summary.get("invariants"),
+        "iterative_strength": summary.get("iterative_strength"),
+        "reference": {"path": REFERENCE_MAP, "written_as": str(written), "voxel_size_a": geometry[0] if geometry else None,
+                      "box_xyz": geometry[1] if geometry else None},
+        "work_dir": str(work_dir),
+        "argv": argv,
+        "versions": source["tool"]["versions"],
+        "copick_helix_version": summary.get("version"),   # as the run reports itself in summary.json
+    }
+    manifest["star"] = _star_recount(out_dir, manifest["totals"]["n_picks"])
+    refusal = None
+    if gate.get("detected") is None:
+        refusal = "summary.json reports no lattice gate, so no polarity call can be trusted"
+    elif gate.get("detected") is not True:
+        refusal = "the helical lattice was not detected, so no polarity was called"
+    elif totals["n_seeds"] == 0:
+        refusal = "no filament is a seed (both methods confident and agreeing)"
+    manifest["polarity"]["refused"] = refusal
+    write_manifest(out_dir / PICKS_MANIFEST, manifest)
+    if refusal:
+        terms = ", ".join(f"{term}: data {pair[0]:.2f} / decoy {pair[1]:.2f}" for term, pair in (gate.get("terms") or {}).items())
+        raise PolarityRefused(f"copick-helix: {refusal}. Lattice gate detected={gate.get('detected')} "
+                              f"(pooled enrichment {terms or 'not reported'}); {totals['n_seeds']} seeds of "
+                              f"{totals['n_analyzed']} filaments analyzed ({totals['n_filaments_in']} traced); "
+                              f"see {out_dir / PICKS_MANIFEST}")
     return manifest
 
 
@@ -1364,9 +1567,10 @@ def boundary(
     if runner.dry_run:
         return {"dry_run": True, "picks_uri": out_uri, "input_picks_uri": picks_uri}
     # Filament picks stay filament picks: picksin keeps IDs, order and transforms (copick-utils >= 1.9), and the export
-    # resolves polarity from the same Filaments the upstream export did (its lineage, not this URI's).
+    # resolves polarity from the same Filaments the upstream export did (its lineage, not this URI's), keeps registered
+    # poses as poses (copick.filaments.polarity), and draws its half sets per whole filament, as upstream did.
     filaments_uri = (upstream.get("filaments") or {}).get("filaments_uri")
-    if upstream.get("orientations") == "filament_frame" and not filaments_uri:
+    if upstream.get("orientations") in ("filament_frame", "registered") and not filaments_uri:
         raise ValueError(f"{sibling_manifest(in_picks)} describes filament picks but names no Filaments; cannot keep their polarity")
     tilt = _project_tilt_pixel_sizes(config)
     tilt.update({run: info["tilt_series_pixel_size_a"] for run, info in (upstream.get("runs") or {}).items()
@@ -1374,7 +1578,8 @@ def boundary(
     manifest = export_copick_picks(
         config=config, out_dir=out_dir, picks_uri=out_uri, tomo_type=tomo_type, voxel_a=voxel_a, layout=layout,
         runs=runs, session_id=session_id, job_type="copick.boundary", tilt_series_pixel_size_a=tilt,
-        filaments_uri=filaments_uri,
+        filaments_uri=filaments_uri, half_sets="filament" if filaments_uri else None,
+        filament_angles="pose" if upstream.get("orientations") == "registered" else "frame",
         source={"kind": "copick-picks-filtered", "input_picks_uri": picks_uri, "input_manifest": str(sibling_manifest(in_picks)),
                 "input_orientations": upstream.get("orientations"),
                 "boundary_model": model, "boundary_voxel_size_a": boundary_voxel_a, "sample_segmentation": sample_uri,
