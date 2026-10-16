@@ -16,6 +16,33 @@ def test_easymode_argv(fake_executables):
     assert argv[argv.index("-t") + 1] == "wbp@8.66"
     assert argv[argv.index("-r") + 1] == "tomo153"
     assert "--no-add-objects" in argv and argv[argv.index("--gpus") + 1] == "0"
+    assert not {"--cpu", "--max-workers", "--threads", "--model-dir", "--report"} & set(argv)
+    argv = external.easymode_segment_argv(config="c.json", models=["ribosome"], tomo_type="wbp", voxel_a=8.66, runs=None, tta=4,
+                                          threshold=0.5, batch_size=1, user_id="easymode", session_id="job005", gpus="0", cpu=True,
+                                          max_workers=2, threads=32, model_dir="/models/easymode", report="AutoPick/job005/easymode_report.json")
+    assert "--cpu" in argv and "--gpus" not in argv and "-r" not in argv           # CPU wins over a GPU list; no runs = all runs
+    assert argv[argv.index("--max-workers") + 1] == "2" and argv[argv.index("--threads") + 1] == "32"
+    assert argv[argv.index("--model-dir") + 1] == "/models/easymode" and argv[argv.index("--report") + 1] == "AutoPick/job005/easymode_report.json"
+    with pytest.raises(ValueError, match="unsafe"):
+        external.easymode_segment_argv(config="c.json", models=["ribosome"], tomo_type="wbp", voxel_a=8.66, runs=None, tta=4, threshold=0.5,
+                                       batch_size=1, user_id="easymode", session_id="job005", model_dir="/m;rm")
+
+
+def test_the_interpreter_behind_a_console_script(tmp_path, monkeypatch):
+    """The octopi localization adapter runs with the Python of the configured octopi script."""
+    import os
+    import sys
+
+    venv = tmp_path / "venv/bin"; venv.mkdir(parents=True); (venv / "python").symlink_to(sys.executable)
+    script = venv / "octopi"; script.write_text(f"#!{venv / 'python'}\n"); script.chmod(0o755)
+    assert external.copick_interpreter(str(script)) == venv / "python"                      # its absolute python shebang
+    env_script = venv / "copick"; env_script.write_text("#!/usr/bin/env python\n"); env_script.chmod(0o755)
+    assert external.copick_interpreter(str(env_script)) == venv / "python"                  # else the python beside it
+    bare = tmp_path / "bare/copick"; bare.parent.mkdir(); bare.write_text("#!/bin/sh\nexit 0\n"); bare.chmod(0o755)
+    assert external.copick_interpreter(str(bare)) is None
+    monkeypatch.setenv("PATH", str(venv) + os.pathsep + os.environ["PATH"])
+    assert external.copick_interpreter("octopi") == venv / "python"                         # a bare name resolves through PATH
+    assert external.copick_interpreter("no-such-tool-here") is None
 
 
 def test_seg2picks_and_picksin_argv(fake_executables):

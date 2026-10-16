@@ -34,7 +34,7 @@ def test_bad_scales_refused(config,lo,hi):
     with pytest.raises(ValueError):contract.radius_settings(config,['ribosome'],10,'com',lo,hi,10)
 
 def test_closed_adapter_argv(config,monkeypatch,tmp_path):
-    monkeypatch.setattr(contract.shard,'copick_interpreter',lambda exe:'/opt/tools/octopi/bin/python')
+    monkeypatch.setattr(contract.external,'copick_interpreter',lambda exe:'/opt/tools/octopi/bin/python')
     argv=contract.adapter_argv(config=config,report=tmp_path/'report.json',runs=['one','two'],model='ribosome',source_session='job006',output_session='job099',voxel_a=10.005,method='com',min_scale=.5,max_scale=1,filter_size=10,workers=2)
     assert argv[:3]==['/opt/tools/octopi/bin/python','-m','copick_pipeliner.tools.octopi_localize_worker']
     assert argv[argv.index('--workers')+1]=='2' and argv[argv.index('--runs')+1]=='one,two'
@@ -98,10 +98,10 @@ def test_octopi_keeps_its_native_merge_and_passes_memory_bound(config, monkeypat
     """A legacy merge request must never change the scientifically distinct Octopi output."""
     monkeypatch.setattr(orchestrate, 'snap_voxel_size', lambda c, v: v)
     monkeypatch.setattr(orchestrate, 'validate_reuse', lambda **kw: {'inference_skipped': True})
-    monkeypatch.setattr(orchestrate.shard, 'run_easymode_sharded', lambda **kw: pytest.fail('inference called'))
+    monkeypatch.setattr(orchestrate.easymode_inference, 'run_inference', lambda **kw: pytest.fail('inference called'))
     monkeypatch.setattr(orchestrate, 'tomogram_voxels', lambda *a: 1022 * 1440 * 400)
     monkeypatch.setattr(orchestrate, 'job_memory_limit_bytes', lambda: 128 * 1024**3)
-    monkeypatch.setattr(contract.shard, 'copick_interpreter', lambda exe: '/opt/tools/octopi/bin/python')
+    monkeypatch.setattr(contract.external, 'copick_interpreter', lambda exe: '/opt/tools/octopi/bin/python')
     monkeypatch.setattr(contract, 'validate_report', lambda *a, **kw: {'status': 'complete'})
     monkeypatch.setattr(orchestrate.dedupe, 'merge_project_picks', lambda *a, **kw: pytest.fail('legacy merge changed Octopi picks'))
     monkeypatch.setattr(orchestrate, 'export_copick_picks', lambda **kw: kw)

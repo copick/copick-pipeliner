@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import dedupe, external, octopi_localization, portal_annotations as portal, shard
+from . import dedupe, easymode_inference, external, octopi_localization, portal_annotations as portal
 from .segmentation_reuse import validate_boundary_reuse, validate_reuse, validate_session
 from .. import settings
 from .export_star import PICKS_MANIFEST, export_copick_picks, export_portal_picks, export_selection_picks
@@ -820,18 +820,19 @@ def easymode(
     *, config: Path, out_dir: Path, session_id: str, models: list[str], tomo_type: str, voxel_a: float,
     runs: list[str] | None, tta: int, threshold: float, batch_size: int, maxima_filter_size: int,
     min_particle_size: int, max_particle_size: int, layout: str, gpus: str | None, use_gpu: bool,
-    threads: int | None, runner: external.Runner, max_workers: int | None = None, shard_hooks: dict | None = None,
+    threads: int | None, runner: external.Runner, max_workers: int | None = None,
     conversion_workers: int | None = None, reuse_segmentation_session: str = "",
     merge_close_picks: bool = True, min_separation_a: float = 0.0,
     conversion_backend: str = "octopi", localization_method: str = "watershed", radius_min_scale: float = 0.5, radius_max_scale: float = 1.0,
 ) -> dict:
-    """easymode segmentation of every model (one worker per allocated GPU, see ``shard``),
-    seg2picks per model, one STAR of the first model. Any incomplete inference raises before
-    seg2picks/export; a rerun in the same session skips the runs already segmented.
+    """easymode segmentation of every model (one ``copick inference easymode``, which runs one worker per
+    allocated GPU itself; see ``easymode_inference``), seg2picks per model, one STAR of the first model. Any
+    incomplete inference raises before seg2picks/export; a rerun in the same session skips the runs already
+    segmented.
 
     ``reuse_segmentation_session`` (root's 10426 recovery, ``segmentation_reuse``): a completed
     sibling job's session whose segmentations are converted into THIS job's session instead of
-    running inference -- only after that job's shard manifest and every segmentation's array
+    running inference -- only after that job's inference manifest and every segmentation's array
     metadata are verified; never an inference fallback. ``conversion_workers``: seg2picks
     parallelism; ``None``/``0`` = automatic (bounded by the job's memory and the volume size,
     see ``bounded_workers``), a positive integer = exactly that many.
@@ -859,13 +860,6 @@ def easymode(
     else:
         localization.update(maxima_filter_size=maxima_filter_size, min_particle_size=min_particle_size, max_particle_size=max_particle_size)
 
-
-    def argv_for(shard_runs: list[str]) -> list[str]:
-        # No --gpus for a worker: its CUDA_VISIBLE_DEVICES is set in its environment (shard.worker_env).
-        return external.easymode_segment_argv(
-            config=str(config), models=models, tomo_type=tomo_type, voxel_a=voxel_a, runs=shard_runs, tta=tta,
-            threshold=threshold, batch_size=batch_size, user_id=user, session_id=session_id, gpus=None)
-
     recovery = None
     if reuse_segmentation_session:
         recovery = validate_reuse(
@@ -876,14 +870,12 @@ def easymode(
                   "status": "reused completed source session", "source_session": source_session,
                   "session_id": session_id, "inference_skipped": True, "recovery": recovery}
         if not runner.dry_run:
-            shard._write(Path(out_dir) / shard.SHARD_MANIFEST, shards)
+            easymode_inference.write_manifest(Path(out_dir) / easymode_inference.MANIFEST, shards)
     else:
-        hooks = shard_hooks or {}
-        shards = shard.run_easymode_sharded(
-            out_dir=out_dir, config=config, runs=selected, models=objects, features=models, user_id=user, session_id=session_id,
-            voxel_a=voxel_a, argv_for=argv_for, gpus=gpus, use_gpu=use_gpu, threads=threads, max_workers=max_workers, dry_run=runner.dry_run, **hooks)
-    for w in shards["workers"]:
-        runner.log.append(["<worker>", f"gpu={w['gpu']}", *w["argv"]])
+        shards = easymode_inference.run_inference(
+            out_dir=out_dir, config=config, runs=selected, models=models, objects=objects, user_id=user, session_id=session_id,
+            tomo_type=tomo_type, voxel_a=voxel_a, tta=tta, threshold=threshold, batch_size=batch_size, gpus=gpus, use_gpu=use_gpu,
+            threads=threads, max_workers=max_workers, runner=runner)
     # seg2picks loads one whole segmentation per worker: bound the parallelism by the job's
     # memory and the volume size, not by the CPU count (10426 at 8.66 A: 64 workers -> OOM),
     # unless the job states an explicit count.
@@ -954,7 +946,7 @@ def easymode(
                 "conversion_workers": seg2picks_workers, "recovery": recovery,
                 "raw_picks_uri": external.seg_uri(primary, user, session_id), "merge_close_picks": merge_report,
                 "sharding": {"n_workers": shards["n_workers"], "devices": shards["devices"], "skipped_existing": shards["skipped_existing"],
-                             "manifest": str(Path(out_dir) / shard.SHARD_MANIFEST)},
+                             "manifest": str(Path(out_dir) / easymode_inference.MANIFEST), "report": shards.get("easymode_report")},
                 "voxel_size_requested_a": requested_voxel_a, "voxel_size_used_a": voxel_a,
                 "seg2picks_parallelism": seg2picks_accounting,
                 "localization": localization},

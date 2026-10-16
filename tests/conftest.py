@@ -23,6 +23,7 @@ def fake_executables(monkeypatch, tmp_path_factory):
     monkeypatch.setenv(settings.ENV_COPICK, str(bin_dir / "copick"))
     monkeypatch.setenv(settings.ENV_OCTOPI, str(bin_dir / "octopi"))
     monkeypatch.setenv(settings.ENV_TOOLS, str(bin_dir / "copick-pipeliner-tools"))
+    monkeypatch.delenv(settings.ENV_EASYMODE_MODELS, raising=False)   # a deployment's model directory must not leak into argv
     return bin_dir
 
 

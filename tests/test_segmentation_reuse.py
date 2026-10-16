@@ -1,5 +1,6 @@
 """Reuse of a completed sibling session (root's 10426 recovery, upstreamed): small metadata fixtures; no inference,
 conversion, images, scheduler or deployment. Adapted: conversion_workers 0 = automatic memory bound (was a fixed default of 2)."""
+import hashlib
 import json
 from pathlib import Path
 import shlex
@@ -10,7 +11,7 @@ import numpy as np
 import pytest
 from click.testing import CliRunner
 from copick_pipeliner.jobs.easymode import CopickEasymodeJob
-from copick_pipeliner.tools import cli, external, orchestrate, shard
+from copick_pipeliner.tools import cli, easymode_inference, external, orchestrate
 from copick_pipeliner.tools.segmentation_reuse import validate_reuse, validate_session
 
 
@@ -92,6 +93,32 @@ def test_metadata_and_completed_provenance_required(recovery):
     assert result['source_session']=='job006' and result['output_session']=='job007'
 
 
+def test_the_current_and_the_earlier_inference_manifests_both_prove_completion(recovery, monkeypatch):
+    """Now ONE invocation (copick-easymode runs the per-GPU workers) with its report beside it; a manifest written by the
+    earlier per-GPU sharding (the fixture's) keeps validating."""
+    kwargs, _, path, _ = recovery
+    assert validate_reuse(**kwargs)['source_inference_manifest'] == str(path)
+    class Tool:
+        dry_run = False
+        def __init__(self): self.log = []
+        def run(self, argv, check=True):
+            self.log.append(argv)
+            runs = argv[argv.index('-r') + 1].split(',')
+            Path(argv[argv.index('--report') + 1]).write_text(json.dumps({'status': 'complete', 'version': '0.4.0', 'devices': ['0', '1'], 'errors': [],
+                'models': [], 'model_directory': '/m', 'workers': [{'index': i, 'gpu': str(i), 'runs': runs[i::2], 'exitcode': 0, 'errors': []} for i in range(2)]}))
+            return 0
+    calls = []
+    monkeypatch.setattr(easymode_inference, 'complete_runs', lambda config, runs, models, **kw: calls.append(1) or (set() if len(calls) == 1 else set(runs)))
+    current = easymode_inference.run_inference(
+        out_dir=path.parent, config=kwargs['config'], runs=kwargs['runs'], models=kwargs['models'], objects=kwargs['models'], user_id='easymode',
+        session_id='job006', tomo_type='wbp', voxel_a=8.66, tta=4, threshold=0.5, batch_size=1, gpus=None, use_gpu=True, threads=None,
+        max_workers=None, runner=Tool())
+    assert json.loads(path.read_text()) == current and len(current['workers']) == 1 and len(current['gpu_workers']) == 2
+    assert validate_reuse(**kwargs)['source_inference_manifest_sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match='settings/config differ'):     # the invocation's flags are what reuse compares
+        validate_reuse(**{**kwargs, 'threshold': 0.7})
+
+
 @pytest.mark.parametrize('damage', ['missing_array','wrong_shape','wrong_scale','wrong_type','wrong_axes','failed_manifest','missing_manifest','failed_worker','missing_run','different_config','different_threshold','same_session','missing_model'])
 def test_incomplete_reuse_refused_before_any_inference_or_conversion(recovery, monkeypatch, damage):
     kwargs,stores,path,manifest=recovery
@@ -114,13 +141,13 @@ def test_incomplete_reuse_refused_before_any_inference_or_conversion(recovery, m
     opts=call_kwargs(recovery,runner)
     if damage=='same_session':opts['session_id']='job006'
     if damage=='missing_model':opts['models']=['ribosome','other']
-    monkeypatch.setattr(shard,'run_easymode_sharded',lambda **k:pytest.fail('inference called'))
+    monkeypatch.setattr(easymode_inference,'run_inference',lambda **k:pytest.fail('inference called'))
     with pytest.raises(ValueError):orchestrate.easymode(**opts)
     assert not runner.log
 
 
 def test_reuse_skips_inference_keeps_source_and_output_distinct(recovery, monkeypatch):
-    monkeypatch.setattr(shard,'run_easymode_sharded',lambda **k:pytest.fail('inference called'))
+    monkeypatch.setattr(easymode_inference,'run_inference',lambda **k:pytest.fail('inference called'))
     runner=external.Runner(dry_run=True)
     result=orchestrate.easymode(**call_kwargs(recovery,runner),conversion_workers=2)
     assert len(runner.log)==1
@@ -130,7 +157,7 @@ def test_reuse_skips_inference_keeps_source_and_output_distinct(recovery, monkey
 
 
 def test_real_branch_records_recovery_in_export_manifest(recovery, monkeypatch):
-    monkeypatch.setattr(shard,'run_easymode_sharded',lambda **k:pytest.fail('inference called'))
+    monkeypatch.setattr(easymode_inference,'run_inference',lambda **k:pytest.fail('inference called'))
     monkeypatch.setattr(orchestrate,'export_copick_picks',lambda **k:k)
     runner=external.Runner(dry_run=False)
     monkeypatch.setattr(runner,'run',lambda argv:runner.log.append(argv))
@@ -154,7 +181,7 @@ def test_normal_inference_still_uses_64_threads_and_conversion_defaults_to_the_m
     def inference(**kwargs):
         seen.update(kwargs)
         return {'workers':[],'n_workers':8,'devices':['0'],'skipped_existing':[]}
-    monkeypatch.setattr(shard,'run_easymode_sharded',inference)
+    monkeypatch.setattr(easymode_inference,'run_inference',inference)
     runner=external.Runner(dry_run=True);opts=call_kwargs(recovery,runner);opts['reuse_segmentation_session']=''
     orchestrate.easymode(**opts)
     assert seen['threads']==64
