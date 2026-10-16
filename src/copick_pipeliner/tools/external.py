@@ -19,6 +19,7 @@ type@vs``, ``-r/--run`` comma list, ``--gpus``, ``--tta``, ``--batch-size``,
 
 from __future__ import annotations
 
+import re
 import shlex
 import shutil
 import subprocess
@@ -211,6 +212,85 @@ def fil2picks_argv(
         argv += ["-w", str(int(workers))]
     argv += run_names_args(runs)
     return argv  # source: copick-utils 1.10.0 cli/fil2picks.py
+
+
+# ---- copick-helix -------------------------------------------------------------------------
+
+#: The copick-helix families whose polarity is called on the cylindrical route (phase invariants + the iterative,
+#: data-built reference): ``microtubule`` (13_3) and ``microtubule_N_S``. Source: copick-helix 0.1.0 families.py.
+_HELIX_CYLINDRICAL = re.compile(r"microtubule(_[1-9][0-9]*_[1-9][0-9]*)?")
+#: The other copick-helix families, and why this job refuses them.
+HELIX_REFUSED_FAMILIES = {
+    "actin": "copick-helix calls actin polarity on its term route (band-limited helical terms, from tilt-series "
+             "reconstructions), which this job does not run and which has not been validated",
+    "intermediate_filament": "copick-helix only recenters intermediate filaments (no lattice was detectable, so it "
+                             "makes no polarity call)",
+}
+#: Both methods, always: a seed is a filament both call confidently and alike (copick-helix ``combine``).
+HELIX_METHODS = "invariants,iterative"
+
+
+def helix_polarity_family(name: str) -> str:
+    """The copick-helix family a polarity job runs, normalized as copick-helix reads it (lowercase, ``_``).
+
+    Only the cylindrical route: ``microtubule`` or ``microtubule_N_S``. actin and intermediate_filament are refused with
+    the reason, anything else as unknown."""
+    key = str(name or "").strip().lower().replace("-", "_")
+    if key in HELIX_REFUSED_FAMILIES:
+        raise ValueError(f"family {key!r} is refused: {HELIX_REFUSED_FAMILIES[key]}. "
+                         "Supported: microtubule, microtubule_N_S")
+    if not _HELIX_CYLINDRICAL.fullmatch(key):
+        raise ValueError(f"unknown family {name!r}: choose microtubule (13 protofilaments, 3-start) or "
+                         "microtubule_N_S (N protofilaments, S-start), e.g. microtubule_14_3")
+    return key
+
+
+def helix_polarity_argv(
+    *, config: str, filaments_uri: str, tomo_type: str, voxel_a: float, family: str, tilt_range: tuple[float, float],
+    tilt_axis: str, work_dir: str, output_uri: str, picks_uri: str, every: int, seeds_only: bool,
+    min_length_a: float | None = None, runs: list[str] | None = None, workers: int | None = None,
+) -> list[str]:
+    """``copick process helix-polarity`` (a copick-helix plugin command): polarity, lattice registration and a
+    reference from the traced Filaments ``filaments_uri``.
+
+    ``output_uri`` receives the analyzed filaments (recentered, ordered minus -> plus where the polarity is known) and
+    one registration pick per segment; ``picks_uri`` the dense lattice-registered picks, every ``every``-th lattice
+    point. ``work_dir`` gets calls.tsv, summary.json, iterative_runs.tsv and reference_<family>.mrc."""
+    check_safe(config, filaments_uri, tomo_type, family, work_dir, output_uri, picks_uri, *(runs or []))
+    family = helix_polarity_family(family)
+    lo, hi = (float(v) for v in tilt_range)
+    if not (-90.0 <= lo < hi <= 90.0):
+        raise ValueError(f"tilt range must satisfy -90 <= min < max <= 90 degrees, got {lo:g}, {hi:g}")
+    if tilt_axis not in ("y", "x"):
+        raise ValueError(f"tilt axis must be y or x, got {tilt_axis!r}")
+    if int(every) < 1:
+        raise ValueError(f"every must be >= 1 lattice point, got {every!r}")
+    argv = [settings.copick_exe(), "process", "helix-polarity", "-c", config, "-i", filaments_uri,
+            "-t", tomo_uri(tomo_type, voxel_a), "--family", family, "--tilt-range", f"{lo:g}", f"{hi:g}",
+            "--tilt-axis", tilt_axis, "--methods", HELIX_METHODS, "--work-dir", work_dir,
+            "-o", output_uri, "--picks", picks_uri, "--every", str(int(every)),
+            "--seeds-only" if seeds_only else "--all-filaments"]
+    if min_length_a is not None:
+        if not float(min_length_a) > 0:
+            raise ValueError(f"min_length must be > 0 Angstrom, got {min_length_a!r}")
+        argv += ["--min-length", f"{float(min_length_a):g}"]
+    if workers:
+        argv += ["--workers", str(int(workers))]
+    argv += run_names_args(runs)
+    return argv  # source: copick-helix 0.1.0 cli.py (helix-polarity and its COMMON options)
+
+
+def helix_available(copick: str | None = None) -> tuple[bool, str]:
+    """Whether ``copick process helix-polarity`` exists in the copick environment (its ``--help`` exits 0), and what
+    the command said otherwise."""
+    argv = [copick or settings.copick_exe(), "process", "helix-polarity", "--help"]
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=300, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"{shlex.join(argv)}: {exc}"
+    if done.returncode != 0:
+        return False, f"{shlex.join(argv)} exited {done.returncode}: {(done.stderr or done.stdout).strip()[-500:]}"
+    return True, ""
 
 
 # ---- copick-torch (MemBrain-seg) --------------------------------------------------------

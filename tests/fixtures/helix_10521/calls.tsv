@@ -1,0 +1,5 @@
+filament	inv_group	inv_loo_projection	inv_eigvec	inv_segments	inv_seg_agree	inv_halves_agree	inv_call	it_segments	it_call	it_loo_margin	it_bootstrap	it_start_stability	it_confident	agree	seed	call	monomer_repeat	quality	parameter_source
+35919_f1	1	0.9271575702460233	0.1352124704132737	6	1.0	True	minus	6	minus	0.503346916349348	1.0	1.0	True	True	True	minus	41.29165212800829	7.898862739363038	measured
+35921_f1	-1	-0.9744640986291605	-0.14257520315604622	6	1.0	True	plus	6	plus	0.6428595495507503	1.0	1.0	True	True	True	plus	41.29733733332995	7.220995098119997	measured
+35939_f1	-1	-0.6109563523203648	-0.09401946752295413	2	1.0	True	plus	2	minus	0.014744541564400082	0.744	1.0	False	False	False	uncertain	41.724271300906835	1.5149628412178158	median of reliable filaments
+35946_f3	-1	-0.4914090022601409	-0.07179055253984817	2	1.0	True	plus	2	plus	0.10529440443267069	1.0	1.0	True	True	False	plus	41.724271300906835	1.7747556106165463	median of reliable filaments
