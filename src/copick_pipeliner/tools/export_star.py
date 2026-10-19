@@ -53,8 +53,13 @@ INDEX_BLOCK = "coordinate_files"
 #: The layout names here (and in ApexAgent's presets and manifests) -> copick's.
 COPICK_LAYOUTS = {LAYOUT_IMPORT_CENTERED: "import", LAYOUT_RELION5: "particles"}
 #: What the Euler angles of an export are: measurements, an initialization (identity rotations written as 0, 0, 0),
-#: or the filament frame (``rlnTomoSubtomogram*`` = the frame, ``rlnAngle*`` = 0, 90, 0 with priors).
-ORIENTATIONS = ("measured", "identity_initialisation", "filament_frame")
+#: the filament frame (``rlnTomoSubtomogram*`` = the frame, ``rlnAngle*`` = 0, 90, 0 with priors), or filament picks'
+#: lattice-registered poses (``rlnAngle*`` = each pick's rotation, no subtomogram or prior columns; copick-helix).
+ORIENTATIONS = ("measured", "identity_initialisation", "filament_frame", "registered")
+#: copick's ``filament_angles`` for a filament export: the frame, or each pick's own rotation as its pose.
+FILAMENT_ANGLES = ("frame", "pose")
+#: copick's ``half_sets``: None (no ``rlnRandomSubset``) or ``"filament"`` (one subset per whole filament).
+HALF_SETS = (None, "filament")
 
 
 def _copick_layout(layout: str) -> str:
@@ -543,6 +548,8 @@ def export_copick_picks(
     source: dict | None = None,
     tilt_series_pixel_size_a: float | dict | None = None,
     filaments_uri: str | None = None,
+    filament_angles: str = "frame",
+    half_sets: str | None = None,
 ) -> dict:
     """copick picks (``object:user/session``) -> ``particles.star`` (+ companions) by copick's export, + the manifest.
 
@@ -554,7 +561,10 @@ def export_copick_picks(
     ``filaments_uri`` makes this a filament export: copick writes RELION's filament columns, and each filament's
     ``rlnAnglePsiFlipRatio`` from the polarity those Filaments state (0 where known, 0.5 elsewhere). copick refuses a
     pick whose filament is not in them and a run whose Filaments are absent (a lineage error); the job fails with
-    both ends of the lineage named. Otherwise
+    both ends of the lineage named. ``filament_angles="pose"`` writes each filament pick's own rotation as its angles,
+    for picks whose rotations are lattice registrations (copick-helix): the manifest says ``registered``. ``half_sets=
+    "filament"`` has copick draw ``rlnRandomSubset`` per whole filament, so no filament contributes to both
+    half-maps. Otherwise
     the angles are the picks' own rotations: ``measured`` when any is not the identity, else an
     ``identity_initialisation`` (0, 0, 0).
     """
@@ -562,10 +572,19 @@ def export_copick_picks(
     from copick.ops.export import export_relion_particles
 
     copick_layout = _copick_layout(layout)
+    if filament_angles not in FILAMENT_ANGLES:
+        raise ValueError(f"filament_angles must be one of {FILAMENT_ANGLES}, not {filament_angles!r}")
+    if half_sets not in HALF_SETS:
+        raise ValueError(f"half_sets must be one of {HALF_SETS}, not {half_sets!r}")
+    filament = filaments_uri is not None
+    if not filament and (filament_angles != "frame" or half_sets):
+        raise ValueError("filament_angles and half_sets apply to a filament export (filaments_uri)")
+    # Passed to copick only when they differ from its defaults (frame, no half sets), which stay copick's.
+    filament_options = {k: v for k, v in (("filament_angles", filament_angles), ("half_sets", half_sets))
+                        if v not in ("frame", None)}
     root = copick.from_file(str(config))
     object_name, rest = picks_uri.split(":", 1)
     user_id, pick_session = rest.split("/", 1)
-    filament = filaments_uri is not None
     out_dir = Path(out_dir)
     manifest = new_manifest("picks", job_type=job_type, session_id=session_id, user_id=user_id, config=str(config))
     manifest["object"] = object_name
@@ -609,7 +628,7 @@ def export_copick_picks(
             tilt_series_pixel_size={r: v for r, v in tilt_by_run.items() if r in included and v is not None}
             if copick_layout == "particles" else None,
             coordinates="centered", include_optics=True, filament_columns="on" if filament else "off",
-            polarity_from_filaments=filament, filaments_uri=filaments_uri, allow_empty=True,
+            polarity_from_filaments=filament, filaments_uri=filaments_uri, allow_empty=True, **filament_options,
         )
     except ValueError as exc:
         if not filament:
@@ -623,7 +642,8 @@ def export_copick_picks(
                                f"holds {manifest['runs'][name]['n_picks']}; the STAR and the manifest would disagree")
     if filament:
         _record_polarity(manifest, result, filaments_uri)
-        orientations = "filament_frame"
+        manifest["filaments"].update(angles=filament_angles, half_sets=half_sets)
+        orientations = "registered" if filament_angles == "pose" else "filament_frame"
     else:
         orientations = "measured" if any(r.any() for r in rotations) else "identity_initialisation"
     manifest["tomogram_voxel_size_a"] = float(voxel_a)

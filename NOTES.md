@@ -262,3 +262,20 @@ missing or failed report, reported errors or a missing segmentation. `easymode_s
 fields `validate_reuse` reads; its `workers` list now holds one entry, the invocation, with copick-easymode's per-GPU
 workers, devices and models beside it (`gpu_workers`, `devices`, `models_fetch`, `easymode_report`). Manifests
 written by 0.1.6-0.1.15 still validate for `reuse_segmentation_session`. Tests: `tests/test_easymode_inference.py`.
+
+## Unreleased: copick.filaments.polarity (copick-helix)
+
+A CPU job (`AutoPick/`, verb `filament-polarity`) that runs copick-helix's `helix-polarity` on a trace's Filaments and
+exports the dense lattice-registered picks; see README "Polarity (copick-helix)". Needs copick >= 1.31 (the `copick`
+extra), whose `export_relion_particles` takes `filament_angles="pose"` (the pick's rotation as its angles, no frame or
+prior columns) and `half_sets="filament"` (`rlnRandomSubset` per whole filament, balanced greedily over the table).
+`copick.filaments.picks` and `copick.boundary` (when its upstream picks are filament picks) now pass
+`half_sets="filament"` too, and boundary keeps `pose` for upstream `registered` picks.
+
+What the manifest reads from copick-helix is pinned to a real run (`tests/fixtures/helix_10521`, the 10521 microtubule
+`summary.json` and four `calls.tsv` rows): `summary.json` holds `family` (as resolved: `microtubule` is
+`microtubule_13_3`), `version`, `invariants` (`eigenvalues`, `eigen_gap`, `model_sign`, `model_cos`, `rstar_R`),
+`iterative_strength` (`consensus`, `random_fixed_mean`, `random_fixed_std`, `model`), `reference_map` (absolute, in the
+work directory) and `lattice_gate` (`detected`, `terms`: `"(n, m)" -> [data, decoy]`). `calls.tsv` names a filament
+`<run>_f<instance id>`, with `call` (minus / plus / uncertain) and `seed`. Tests: `tests/test_filament_polarity.py`
+(a fake runner writes those outputs, the picks and the Filaments into a synthetic project; copick's export is real).
