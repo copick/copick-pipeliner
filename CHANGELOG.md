@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/copick/copick-pipeliner/compare/copick-pipeliner-v0.2.0...copick-pipeliner-v0.3.0) (2026-10-19)
+
+
+### ✨ Features
+
+* copick.filaments.polarity, microtubule polarity and lattice-registered picks from copick-helix ([#10](https://github.com/copick/copick-pipeliner/issues/10)) ([196a198](https://github.com/copick/copick-pipeliner/commit/196a198477ab5003f2d333a3b66568538e0f8e80))
+
 ## [0.2.0](https://github.com/copick/copick-pipeliner/compare/copick-pipeliner-v0.1.15...copick-pipeliner-v0.2.0) (2026-10-16)
 
 
