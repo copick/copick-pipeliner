@@ -72,6 +72,7 @@ class CopickSegmentEasymodeJob(CopickJobBase):
             is_required=False,
         )
         self.add_gpu_options()
+        self.add_xla_option()
         self.get_runtab_options(threads=True)
 
     def create_output_nodes(self) -> None:
@@ -89,6 +90,7 @@ class CopickSegmentEasymodeJob(CopickJobBase):
         args += ["--threshold", jo["threshold"].get_string()]
         args += ["--batch-size", jo["batch_size"].get_string()]
         args += self.gpu_args()
+        args += self.xla_args()
         source = validate_session(jo["reuse_segmentation_session"].get_string())
         if source:
             args += ["--reuse-segmentation-session", source]

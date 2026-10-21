@@ -202,6 +202,10 @@ def test_segment_command(fake_executables):
     assert argv[1] == "segment-easymode" and argv[argv.index("--session-id") + 1] == "job009"
     assert argv[argv.index("--models") + 1] == "microtubule" and argv[argv.index("--voxel-size") + 1] == "10.005"
     assert "--reuse-segmentation-session" not in argv and "--layout" not in argv   # segmentation only: no STAR
+    assert "--no-xla" in argv and "--xla" not in argv                                # copick-easymode's opt-in default
+    job.joboptions["use_xla"].value = "Yes"
+    assert "--xla" in _argv(job) and "--no-xla" not in _argv(job)
+    job.joboptions["use_xla"].value = "No"
     job.joboptions["reuse_segmentation_session"].value = "job006"
     assert _argv(job)[_argv(job).index("--reuse-segmentation-session") + 1] == "job006"
     job.joboptions["reuse_segmentation_session"].value = "../job006"

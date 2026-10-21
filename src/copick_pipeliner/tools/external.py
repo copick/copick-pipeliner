@@ -72,11 +72,12 @@ def easymode_segment_argv(
     *, config: str, models: list[str], tomo_type: str, voxel_a: float, runs: list[str] | None,
     tta: int, threshold: float, batch_size: int, user_id: str, session_id: str, gpus: str | None = None,
     cpu: bool = False, max_workers: int | None = None, threads: int | None = None, model_dir: str | None = None,
-    report: str | None = None,
+    report: str | None = None, xla: bool = False,
 ) -> list[str]:
     """One ``copick inference easymode``: copick-easymode (>= 0.4.0) starts one worker per GPU itself.
     ``gpus`` (empty = every GPU of the allocation) or ``cpu`` (one worker, no GPU); ``threads`` is the total
-    divided among the workers; ``model_dir`` overrides easymode's model directory in memory."""
+    divided among the workers; ``model_dir`` overrides easymode's model directory in memory. ``xla`` runs each
+    model's forward pass as one XLA-compiled function (``--xla``, copick-easymode >= 0.5.0)."""
     check_safe(config, *models, tomo_type, user_id, session_id, *(runs or []), gpus or "", model_dir or "", report or "")
     argv = [settings.copick_exe(), "inference", "easymode", "-c", config, "-m", ",".join(models),
             "-t", tomo_uri(tomo_type, voxel_a), "--tta", str(int(tta)), "--threshold", str(float(threshold)),
@@ -96,6 +97,8 @@ def easymode_segment_argv(
         argv += ["--model-dir", model_dir]
     if report:
         argv += ["--report", report]
+    if xla:
+        argv += ["--xla"]
     return argv
 
 

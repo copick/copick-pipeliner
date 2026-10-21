@@ -143,6 +143,7 @@ class CopickEasymodeJob(CopickJobBase):
         )
         self.add_layout_option()
         self.add_gpu_options()
+        self.add_xla_option()
         self.get_runtab_options(threads=True)
 
     def create_output_nodes(self) -> None:
@@ -170,6 +171,7 @@ class CopickEasymodeJob(CopickJobBase):
                 args += ["--" + name.replace("_", "-"), jo[name].get_string()]
         args += ["--layout", jo["star_layout"].get_string()]
         args += self.gpu_args()
+        args += self.xla_args()
         args += ["--conversion-workers", jo["conversion_workers"].get_string()]
         if backend == "legacy_seg2picks":
             args += ["--merge-close-picks" if jo["merge_close_picks"].get_boolean() else "--no-merge-close-picks"]

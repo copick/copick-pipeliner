@@ -118,7 +118,8 @@ def _gpu_options(func):
 @click.option("--localization-method", type=click.Choice(["watershed", "com"]), default="watershed", help="Octopi backend: watershed or connected-component centre of mass.")
 @click.option("--radius-min-scale", type=float, default=0.5, help="Octopi backend: minimum accepted radius as a fraction of the object radius (also its centroid-merge distance).")
 @click.option("--radius-max-scale", type=float, default=1.0, help="Octopi backend: maximum accepted radius as a fraction of the object radius.")
-def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, models, tomo_type, voxel_size, tta, threshold, batch_size, maxima_filter_size, min_particle_size, max_particle_size, layout, max_workers, conversion_workers, reuse_segmentation_session, merge_close_picks, min_separation_a, conversion_backend, localization_method, radius_min_scale, radius_max_scale):
+@click.option("--xla/--no-xla", default=False, help="XLA-compiled inference (copick-easymode >= 0.5.0 --xla): one compiled forward pass per model; needs ptxas.")
+def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, models, tomo_type, voxel_size, tta, threshold, batch_size, maxima_filter_size, min_particle_size, max_particle_size, layout, max_workers, conversion_workers, reuse_segmentation_session, merge_close_picks, min_separation_a, conversion_backend, localization_method, radius_min_scale, radius_max_scale, xla):
     """copick-easymode segmentation (its own worker per allocated GPU) -> localization -> particles.star."""
     manifest = orchestrate.easymode(
         config=Path(config), out_dir=Path(out_dir), session_id=session_id, models=[m.strip() for m in models.split(",") if m.strip()],
@@ -128,6 +129,7 @@ def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
         conversion_workers=conversion_workers, reuse_segmentation_session=reuse_segmentation_session,
         merge_close_picks=merge_close_picks, min_separation_a=min_separation_a,
         conversion_backend=conversion_backend, localization_method=localization_method, radius_min_scale=radius_min_scale, radius_max_scale=radius_max_scale,
+        xla=xla,
     )
     click.echo(json.dumps(manifest.get("totals", manifest)))
 
@@ -144,13 +146,14 @@ def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
 @click.option("--batch-size", type=int, default=1)
 @click.option("--max-workers", type=int, default=None, help="Cap on parallel inference workers (default: one per visible GPU).")
 @click.option("--reuse-segmentation-session", default="", help="Completed sibling job's session whose verified segmentations this job records instead of running inference.")
-def segment_easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, models, tomo_type, voxel_size, tta, threshold, batch_size, max_workers, reuse_segmentation_session):
+@click.option("--xla/--no-xla", default=False, help="XLA-compiled inference (copick-easymode >= 0.5.0 --xla): one compiled forward pass per model; needs ptxas.")
+def segment_easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, models, tomo_type, voxel_size, tta, threshold, batch_size, max_workers, reuse_segmentation_session, xla):
     """copick-easymode segmentation only (one worker per allocated GPU) -> segmentations.json."""
     manifest = orchestrate.segment_easymode(
         config=Path(config), out_dir=Path(out_dir), session_id=session_id, models=[m.strip() for m in models.split(",") if m.strip()],
         tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type), voxel_a=voxel_size, runs=_runs(runs), tta=tta,
         threshold=threshold, batch_size=batch_size, gpus=gpus, use_gpu=not no_gpu, threads=threads, runner=Runner(dry_run=dry_run),
-        max_workers=max_workers, reuse_segmentation_session=reuse_segmentation_session,
+        max_workers=max_workers, reuse_segmentation_session=reuse_segmentation_session, xla=xla,
     )
     click.echo(json.dumps(manifest["totals"]))
 

@@ -25,7 +25,7 @@ like any RELION job.
   They load in the pipeliner control process (ApexAgent's venv) and turn joboptions into one
   `copick-pipeliner-tools <verb> ...` command line.
 * **Tools** (`copick_pipeliner.tools`, console script `copick-pipeliner-tools`) run where the
-  scientific stack is: copick, copick-utils, and for the ML jobs copick-easymode (>= 0.4.0)/TensorFlow,
+  scientific stack is: copick, copick-utils, and for the ML jobs copick-easymode (>= 0.4.0; >= 0.5.0 for `use_xla`)/TensorFlow,
   octopi/torch, copick-torch. They are found through `PIPELINER_COPICK_EXECUTABLE`,
   `PIPELINER_OCTOPI_EXECUTABLE` and (optionally) `PIPELINER_COPICK_PIPELINER_TOOLS_EXECUTABLE`,
   the same convention as pipeliner's `PIPELINER_CTFFIND_EXECUTABLE`. Install this package in
@@ -167,6 +167,16 @@ worker), splits the runs between them, and exits non-zero when any run fails. Ru
 already segmented are skipped, and the job stops before localization or export unless every requested segmentation
 exists with its tomogram's shape. `easymode_shards.json` in the job directory records the invocation and, from
 copick-easymode's own report (`easymode_report.json`), the devices, the per-GPU workers and the models used.
+
+`use_xla=Yes` passes `--xla` (copick-easymode >= 0.5.0), which runs each model's forward pass as one
+XLA-compiled function.
+- On 10521 microtubules at tta 4 it is about 3× faster than the plain run, at a mask IoU of 0.9999.
+- The first call per worker and tile shape compiles, which takes about 27 s.
+- It needs `ptxas` for the GPU.
+- A compiled call that raises falls back to the plain model for that worker. The fallback is recorded in the
+  manifest (`xla_fallbacks`), and the run still counts as processed.
+- It is off by default, as in copick-easymode.
+- Both easymode job types take the option, and their manifests record whether it was used.
 
 easymode keeps its weights in one directory, `MODEL_DIRECTORY` in `~/easymode/settings.txt` (default
 `~/easymode`). Set `COPICK_PIPELINER_EASYMODE_MODELS` to a directory every job can read, and the job passes it as

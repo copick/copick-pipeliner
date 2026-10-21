@@ -60,7 +60,9 @@ if spec["report"]:
         "model_directory": "/models/easymode", "online": False, "writable": True, "missing": spec["missing"],
         "models": [{{"feature": "ribosome", "tag": "v1", "timestamp": "2026-01-01", "weights": "/models/easymode/ribosome.h5", "bytes": 1, "kind": "3d"}}],
         "workers": [{{"index": i, "gpu": gpu, "runs": runs[i::2], "exitcode": 1 if (errors and i == 1) else 0, "seconds": 1.0,
-                      "processed": len(runs[i::2]), "skipped": 0, "errors": errors if i == 1 else []}} for i, gpu in enumerate(["0", "1"])],
+                      "processed": len(runs[i::2]), "skipped": 0, "errors": errors if i == 1 else [],
+                      "xla_fallbacks": spec.get("xla_fallbacks", []) if i == 0 else []}} for i, gpu in enumerate(["0", "1"])],
+        "xla": "--xla" in argv,
         "processed": len(runs), "skipped": 0, "errors": errors,
         "seen_manifest_status": json.load(open(manifest))["status"] if os.path.exists(manifest) else None,
     }}, open(report, "w"))
@@ -68,11 +70,11 @@ sys.exit(spec["exit"])
 """
 
 
-def _fake_copick(bin_dir: Path, *, exit_code=0, status="complete", errors=(), report=True, missing=None) -> Path:
+def _fake_copick(bin_dir: Path, *, exit_code=0, status="complete", errors=(), report=True, missing=None, xla_fallbacks=()) -> Path:
     """Stands in for copick-easymode >= 0.4.0: records its argv, writes a report for two GPU workers, exits as told."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     (bin_dir / "spec.json").write_text(json.dumps({"exit": exit_code, "status": status, "errors": list(errors), "report": report,
-                                                   "missing": missing or {}}))
+                                                   "missing": missing or {}, "xla_fallbacks": list(xla_fallbacks)}))
     exe = bin_dir / "copick"
     exe.write_text(FAKE_COPICK.format(python=sys.executable))
     exe.chmod(0o755)
@@ -139,6 +141,27 @@ def test_a_complete_run_records_the_invocation_and_the_report_beside_it(tmp_path
     assert manifest["copick_easymode_version"] == "0.4.0" and manifest["easymode_version"] == "1.2.5" and manifest["models"] == ["atp-synthase"] and manifest["features"] == ["atp_synthase"]
     report = json.loads(Path(manifest["easymode_report"]).read_text())
     assert report["seen_manifest_status"] == "running"                                    # the manifest exists while inference runs
+
+
+def test_xla_reaches_copick_easymode_and_its_fallbacks_are_recorded(tmp_path, monkeypatch):
+    """--xla (copick-easymode >= 0.5.0): a compiled call that raised ran the plain model; the run still counts."""
+    bin_dir = tmp_path / "bin"
+    monkeypatch.setenv(settings.ENV_COPICK, str(_fake_copick(
+        bin_dir, xla_fallbacks=[{"feature": "microtubule", "reason": "ptxas too old for sm_90"}])))
+    monkeypatch.setattr(easymode_inference, "complete_runs", _nothing_then("all"))
+    manifest = easymode_inference.run_inference(
+        out_dir=tmp_path / "Segment/job003", config=tmp_path / "c.json", runs=["run_a", "run_b"], models=["microtubule"],
+        objects=["microtubule"], user_id="easymode", session_id="job003", tomo_type="wbp", voxel_a=10.0, tta=4, threshold=0.5,
+        batch_size=1, gpus=None, use_gpu=True, threads=None, max_workers=None, runner=external.Runner(), xla=True)
+    (argv,) = _calls(bin_dir)
+    assert argv.count("--xla") == 1 and manifest["status"] == "complete" and manifest["xla"] is True
+    assert manifest["xla_fallbacks"] == [{"worker": 0, "gpu": "0", "feature": "microtubule", "reason": "ptxas too old for sm_90"}]
+    plain = external.Runner(dry_run=True)
+    easymode_inference.run_inference(
+        out_dir=tmp_path / "Segment/job004", config=tmp_path / "c.json", runs=["run_a"], models=["microtubule"], objects=["microtubule"],
+        user_id="easymode", session_id="job004", tomo_type="wbp", voxel_a=10.0, tta=4, threshold=0.5, batch_size=1, gpus=None,
+        use_gpu=True, threads=None, max_workers=None, runner=plain)
+    assert "--xla" not in plain.log[0]                                                     # off unless asked for
 
 
 @pytest.mark.parametrize("case, fake, lookup, match", [
