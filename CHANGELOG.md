@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/copick/copick-pipeliner/compare/copick-pipeliner-v0.3.0...copick-pipeliner-v0.4.0) (2026-10-21)
+
+
+### ✨ Features
+
+* XLA-compiled easymode inference, use_xla on both easymode jobs ([#12](https://github.com/copick/copick-pipeliner/issues/12)) ([1f3b5d6](https://github.com/copick/copick-pipeliner/commit/1f3b5d6d48502aec94487d5bec1555cbfc4b9ed5))
+
 ## [0.3.0](https://github.com/copick/copick-pipeliner/compare/copick-pipeliner-v0.2.0...copick-pipeliner-v0.3.0) (2026-10-19)
 
 
