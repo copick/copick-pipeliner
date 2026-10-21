@@ -16,7 +16,9 @@ def test_easymode_argv(fake_executables):
     assert argv[argv.index("-t") + 1] == "wbp@8.66"
     assert argv[argv.index("-r") + 1] == "tomo153"
     assert "--no-add-objects" in argv and argv[argv.index("--gpus") + 1] == "0"
-    assert not {"--cpu", "--max-workers", "--threads", "--model-dir", "--report"} & set(argv)
+    assert not {"--cpu", "--max-workers", "--threads", "--model-dir", "--report", "--xla"} & set(argv)
+    assert external.easymode_segment_argv(config="c.json", models=["ribosome"], tomo_type="wbp", voxel_a=8.66, runs=None, tta=4,
+                                          threshold=0.5, batch_size=1, user_id="easymode", session_id="job005", xla=True)[-1] == "--xla"
     argv = external.easymode_segment_argv(config="c.json", models=["ribosome"], tomo_type="wbp", voxel_a=8.66, runs=None, tta=4,
                                           threshold=0.5, batch_size=1, user_id="easymode", session_id="job005", gpus="0", cpu=True,
                                           max_workers=2, threads=32, model_dir="/models/easymode", report="AutoPick/job005/easymode_report.json")

@@ -861,6 +861,7 @@ def _easymode_inference(
     *, config: Path, out_dir: Path, session_id: str, source_session: str, models: list[str], objects: list[str],
     tomo_type: str, voxel_a: float, runs: list[str], tta: int, threshold: float, batch_size: int, gpus: str | None,
     use_gpu: bool, threads: int | None, runner: external.Runner, max_workers: int | None, reuse: bool,
+    xla: bool = False,
 ) -> tuple[dict, dict | None]:
     """easymode segmentations of ``objects`` for ``runs``, at ``voxel_a`` (already snapped), in ``source_session``.
 
@@ -885,7 +886,8 @@ def _easymode_inference(
         shards = easymode_inference.run_inference(
             out_dir=out_dir, config=config, runs=runs, models=models, objects=objects, user_id=EASYMODE_USER,
             session_id=session_id, tomo_type=tomo_type, voxel_a=voxel_a, tta=tta, threshold=threshold,
-            batch_size=batch_size, gpus=gpus, use_gpu=use_gpu, threads=threads, max_workers=max_workers, runner=runner)
+            batch_size=batch_size, gpus=gpus, use_gpu=use_gpu, threads=threads, max_workers=max_workers, runner=runner,
+            xla=xla)
     return shards, recovery
 
 
@@ -893,7 +895,7 @@ def segment_easymode(
     *, config: Path, out_dir: Path, session_id: str, models: list[str], tomo_type: str, voxel_a: float,
     runs: list[str] | None, tta: int, threshold: float, batch_size: int, gpus: str | None, use_gpu: bool,
     threads: int | None, runner: external.Runner, max_workers: int | None = None,
-    reuse_segmentation_session: str = "",
+    reuse_segmentation_session: str = "", xla: bool = False,
 ) -> dict:
     """easymode segmentation only: one ``copick inference easymode`` (or a verified reuse), then ``segmentations.json``.
 
@@ -915,7 +917,7 @@ def segment_easymode(
         config=config, out_dir=out_dir, session_id=session_id, source_session=source_session, models=models,
         objects=objects, tomo_type=tomo_type, voxel_a=voxel_a, runs=selected, tta=tta, threshold=threshold,
         batch_size=batch_size, gpus=gpus, use_gpu=use_gpu, threads=threads, runner=runner, max_workers=max_workers,
-        reuse=bool(reuse_segmentation_session))
+        reuse=bool(reuse_segmentation_session), xla=xla)
     uris = {obj: external.seg_uri(obj, EASYMODE_USER, source_session, voxel_a) for obj in objects}
     manifest = new_manifest("segmentations", job_type="copick.segment.easymode", session_id=session_id,
                             user_id=EASYMODE_USER, config=str(config))
@@ -940,7 +942,8 @@ def segment_easymode(
         "recovery": recovery,
         "sharding": {"n_workers": shards["n_workers"], "devices": shards["devices"],
                      "skipped_existing": shards["skipped_existing"], "status": shards.get("status"),
-                     "manifest": str(Path(out_dir) / easymode_inference.MANIFEST), "report": shards.get("easymode_report")},
+                     "manifest": str(Path(out_dir) / easymode_inference.MANIFEST), "report": shards.get("easymode_report"),
+                     "xla": bool(shards.get("xla")), "xla_fallbacks": shards.get("xla_fallbacks")},
     })
     if runner.dry_run:
         manifest["runs"] = {name: {"segmentation_present": None, "segmentation_uri": uris[objects[0]]} for name in selected}
@@ -995,6 +998,7 @@ def easymode(
     conversion_workers: int | None = None, reuse_segmentation_session: str = "",
     merge_close_picks: bool = True, min_separation_a: float = 0.0,
     conversion_backend: str = "octopi", localization_method: str = "watershed", radius_min_scale: float = 0.5, radius_max_scale: float = 1.0,
+    xla: bool = False,
 ) -> dict:
     """easymode segmentation of every model (one ``copick inference easymode``, which runs one worker per
     allocated GPU itself; see ``easymode_inference``), seg2picks per model, one STAR of the first model. Any
@@ -1036,7 +1040,7 @@ def easymode(
         config=config, out_dir=out_dir, session_id=session_id, source_session=source_session, models=models,
         objects=objects, tomo_type=tomo_type, voxel_a=voxel_a, runs=selected, tta=tta, threshold=threshold,
         batch_size=batch_size, gpus=gpus, use_gpu=use_gpu, threads=threads, runner=runner, max_workers=max_workers,
-        reuse=bool(reuse_segmentation_session))
+        reuse=bool(reuse_segmentation_session), xla=xla)
     # seg2picks loads one whole segmentation per worker: bound the parallelism by the job's
     # memory and the volume size, not by the CPU count (10426 at 8.66 A: 64 workers -> OOM),
     # unless the job states an explicit count.
@@ -1107,7 +1111,8 @@ def easymode(
                 "conversion_workers": seg2picks_workers, "recovery": recovery,
                 "raw_picks_uri": external.seg_uri(primary, user, session_id), "merge_close_picks": merge_report,
                 "sharding": {"n_workers": shards["n_workers"], "devices": shards["devices"], "skipped_existing": shards["skipped_existing"],
-                             "manifest": str(Path(out_dir) / easymode_inference.MANIFEST), "report": shards.get("easymode_report")},
+                             "manifest": str(Path(out_dir) / easymode_inference.MANIFEST), "report": shards.get("easymode_report"),
+                     "xla": bool(shards.get("xla")), "xla_fallbacks": shards.get("xla_fallbacks")},
                 "voxel_size_requested_a": requested_voxel_a, "voxel_size_used_a": voxel_a,
                 "seg2picks_parallelism": seg2picks_accounting,
                 "localization": localization},

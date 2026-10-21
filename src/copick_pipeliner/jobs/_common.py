@@ -186,6 +186,19 @@ class CopickJobBase(PipelinerJob):
             is_required=False,
         )
 
+    def add_xla_option(self) -> None:
+        """copick-easymode's ``--xla`` for the jobs that run easymode inference."""
+        self.joboptions["use_xla"] = BooleanJobOption(
+            label="XLA-compiled inference?",
+            default_value=False,
+            help_text=(
+                "copick-easymode --xla (0.5.0 or later): each model's forward pass runs as one XLA-compiled "
+                "function, about 3x faster for the 3D models on 10521 at a mask IoU of 0.9999 against the plain "
+                "run. Needs ptxas for the GPU. A compiled call that raises falls back to the plain model for that "
+                "worker, and the fallback is recorded in the manifest. Off by default, as in copick-easymode."
+            ),
+        )
+
     # ---- outputs ----------------------------------------------------------------------
 
     def add_picks_outputs(self, tool_kwd: str) -> None:
@@ -212,6 +225,11 @@ class CopickJobBase(PipelinerJob):
         if not self.joboptions["use_gpu"].get_boolean():
             return ["--no-gpu"]
         return opt("--gpus", self.joboptions["gpu_ids"].get_string())
+
+    def xla_args(self) -> list[str]:
+        if "use_xla" not in self.joboptions:
+            return []
+        return ["--xla"] if self.joboptions["use_xla"].get_boolean() else ["--no-xla"]
 
     def runs_args(self) -> list[str]:
         return opt("--runs", self.joboptions["runs"].get_string()) if "runs" in self.joboptions else []

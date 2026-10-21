@@ -36,6 +36,8 @@ MANIFEST = "easymode_shards.json"
 REPORT = "easymode_report.json"
 #: The first copick-easymode with its own multi-GPU workers, ``--model-dir`` and ``--report``.
 MIN_COPICK_EASYMODE = "0.4.0"
+#: The first copick-easymode with ``--xla`` (XLA-compiled inference; an older one refuses the flag).
+MIN_COPICK_EASYMODE_XLA = "0.5.0"
 ENV_VISIBLE = "CUDA_VISIBLE_DEVICES"
 
 
@@ -105,6 +107,17 @@ def _worker_failed(worker: dict) -> bool:
     return worker.get("exitcode") != 0 or bool(worker.get("errors"))
 
 
+def xla_fallbacks(report: dict) -> list[dict]:
+    """Every model a worker ran without XLA after its compiled call raised (copick-easymode logs one warning and
+    continues with the plain model, so these runs still count as processed): worker, GPU, feature, reason."""
+    out = []
+    for worker in report.get("workers") or []:
+        for fallback in worker.get("xla_fallbacks") or []:
+            out.append({"worker": worker.get("index"), "gpu": worker.get("gpu"),
+                        "feature": fallback.get("feature"), "reason": str(fallback.get("reason") or "")[:300]})
+    return out
+
+
 def write_manifest(path: Path, payload: dict) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +133,7 @@ def _utc() -> str:
 def run_inference(
     *, out_dir: Path, config: Path, runs: Sequence[str], models: Sequence[str], objects: Sequence[str], user_id: str, session_id: str,
     tomo_type: str, voxel_a: float, tta: int, threshold: float, batch_size: int, gpus: str | None, use_gpu: bool,
-    threads: int | None, max_workers: int | None, runner: external.Runner,
+    threads: int | None, max_workers: int | None, runner: external.Runner, xla: bool = False,
 ) -> dict:
     """Skip, run, verify; returns the inference manifest (also written to ``out_dir``). Raises ``InferenceError``
     on a failed invocation or a missing segmentation, before anything downstream. A dry run plans only.
@@ -137,7 +150,7 @@ def run_inference(
     argv = external.easymode_segment_argv(
         config=str(config), models=list(models), tomo_type=tomo_type, voxel_a=voxel_a, runs=todo, tta=tta, threshold=threshold,
         batch_size=batch_size, user_id=user_id, session_id=session_id, gpus=gpus if use_gpu else None, cpu=not use_gpu,
-        max_workers=max_workers, threads=threads, model_dir=model_dir, report=str(report_path)) if todo else None
+        max_workers=max_workers, threads=threads, model_dir=model_dir, report=str(report_path), xla=xla) if todo else None
     invocation = {"index": 0, "command": "copick inference easymode", "runs": todo, "argv": argv, "returncode": None,
                   "reported_errors": None, "error_lines": [], "seconds": None}
     manifest = {
@@ -145,6 +158,7 @@ def run_inference(
         "session_id": session_id, "user_id": user_id, "models": list(objects), "features": list(models), "tomo_type": tomo_type,
         "voxel_size_a": voxel_a, "requested_runs": requested, "skipped_existing": sorted(done_before), "use_gpu": use_gpu,
         "gpus_requested": gpus or None, "max_workers": max_workers, "threads": threads, "model_directory": model_dir,
+        "xla": bool(xla), "xla_fallbacks": None,
         "allocation_visible_devices": os.environ.get(ENV_VISIBLE), "workers": [invocation] if todo else [],
         "n_workers": None, "devices": None, "threads_per_worker": None, "gpu_workers": None, "models_fetch": None,
         "easymode_report": str(report_path) if todo else None, "copick_easymode_version": None, "easymode_version": None,
@@ -182,7 +196,7 @@ def run_inference(
         manifest.update(copick_easymode_version=report.get("version"), easymode_version=report.get("easymode_version"),
                         easymode_status=report.get("status"), gpu_workers=gpu_workers,
                         n_workers=len(gpu_workers), devices=report.get("devices"), threads_per_worker=report.get("threads_per_worker"),
-                        models_fetch=models_fetch(report))
+                        models_fetch=models_fetch(report), xla_fallbacks=xla_fallbacks(report))
     done_after = complete_runs(config, requested, objects, user_id=user_id, session_id=session_id, voxel_a=voxel_a)
     missing = [r for r in requested if r not in done_after]
     manifest.update(finished_utc=_utc(), failed_workers=[w.get("index") for w in failed_gpu], missing_segmentations=missing)
@@ -193,7 +207,8 @@ def run_inference(
         why.append(f"copick inference easymode exited {returncode}")
     if report is None:
         why.append(f"it wrote no report at {report_path} (copick-easymode >= {MIN_COPICK_EASYMODE} writes one on every exit but a "
-                   "usage error; an older version refuses --report)")
+                   "usage error; an older version refuses --report"
+                   + (f", and one older than {MIN_COPICK_EASYMODE_XLA} refuses --xla" if xla else "") + ")")
     elif report.get("status") != "complete":
         why.append(f"its report says status {report.get('status')!r}")
     if failed_gpu:
@@ -215,5 +230,6 @@ def run_inference(
     manifest["status"] = "complete"
     write_manifest(out_dir / MANIFEST, manifest)
     print(f"easymode inference: complete, {manifest['n_workers']} worker(s) on {manifest['devices'] or 'the CPU'}, "
-          f"{len(todo)} run(s) in {invocation['seconds']} s", flush=True)
+          f"{len(todo)} run(s) in {invocation['seconds']} s" + (", XLA" if xla else "")
+          + (f", {len(manifest['xla_fallbacks'])} XLA fallback(s)" if manifest.get("xla_fallbacks") else ""), flush=True)
     return manifest
