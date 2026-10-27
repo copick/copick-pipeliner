@@ -1,5 +1,5 @@
-"""Reuse of a completed sibling session (root's 10426 recovery, upstreamed): small metadata fixtures; no inference,
-conversion, images, scheduler or deployment. Adapted: conversion_workers 0 = automatic memory bound (was a fixed default of 2)."""
+"""Reuse of a completed sibling session (root's 10426 recovery, upstreamed), through ``copick.segment.easymode``: small
+metadata fixtures; no inference, images, scheduler or deployment."""
 import hashlib
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from click.testing import CliRunner
-from copick_pipeliner.jobs.easymode import CopickEasymodeJob
+from copick_pipeliner.jobs.segment import CopickSegmentEasymodeJob
 from copick_pipeliner.tools import cli, easymode_inference, external, orchestrate
 from copick_pipeliner.tools.segmentation_reuse import validate_reuse, validate_session
 
@@ -62,22 +62,17 @@ def recovery(tmp_path, monkeypatch):
 
 def call_kwargs(recovery, runner):
     k = recovery[0]
-    return dict(conversion_backend='legacy_seg2picks',config=k['config'], out_dir=k['out_dir'], session_id='job007', models=['ribosome'], tomo_type='wbp', voxel_a=8.66, runs=['a','b'], tta=4, threshold=.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000, layout='import_centered', gpus=None, use_gpu=False, threads=64, runner=runner, reuse_segmentation_session='job006')
+    return dict(config=k['config'], out_dir=k['out_dir'], session_id='job007', models=['ribosome'], tomo_type='wbp', voxel_a=8.66, runs=['a','b'], tta=4, threshold=.5, batch_size=1, gpus=None, use_gpu=False, threads=64, runner=runner, reuse_segmentation_session='job006')
 
 
 def test_typed_options_and_command_forwarding():
-    job=CopickEasymodeJob(); job.output_dir='AutoPick/job007/'
+    job=CopickSegmentEasymodeJob(); job.output_dir='Segment/job007/'
     job.joboptions['voxel_size'].value=8.66
     job.joboptions['copick_config'].value='Copick/job005/copick_config.json'
     job.joboptions['reuse_segmentation_session'].value='job006'
     argv=[str(a) for a in job.get_commands()[0].cmd]
-    assert argv[argv.index('--conversion-workers')+1]=='0'          # 0 = automatic (memory- and volume-bounded)
     assert argv[argv.index('--reuse-segmentation-session')+1]=='job006'
     assert argv[argv.index('--session-id')+1]=='job007'
-    assert job.joboptions['conversion_workers'].hard_min==0
-    job.joboptions['conversion_workers'].value=2
-    argv=[str(a) for a in job.get_commands()[0].cmd]
-    assert argv[argv.index('--conversion-workers')+1]=='2'
 
 
 @pytest.mark.parametrize('value', ['../job006','a/b','x y',';bad','a.b','', 'a'*65])
@@ -121,7 +116,7 @@ def test_the_current_and_the_earlier_inference_manifests_both_prove_completion(r
 
 
 @pytest.mark.parametrize('damage', ['missing_array','wrong_shape','wrong_scale','wrong_type','wrong_axes','failed_manifest','missing_manifest','failed_worker','missing_run','different_config','different_threshold','same_session','missing_model'])
-def test_incomplete_reuse_refused_before_any_inference_or_conversion(recovery, monkeypatch, damage):
+def test_incomplete_reuse_refused_before_any_inference(recovery, monkeypatch, damage):
     kwargs,stores,path,manifest=recovery
     if damage=='missing_array':(stores['b']/'.zarray').unlink()
     if damage in ('wrong_shape','wrong_type'):
@@ -143,66 +138,51 @@ def test_incomplete_reuse_refused_before_any_inference_or_conversion(recovery, m
     if damage=='same_session':opts['session_id']='job006'
     if damage=='missing_model':opts['models']=['ribosome','other']
     monkeypatch.setattr(easymode_inference,'run_inference',lambda **k:pytest.fail('inference called'))
-    with pytest.raises(ValueError):orchestrate.easymode(**opts)
+    with pytest.raises(ValueError):orchestrate.segment_easymode(**opts)
     assert not runner.log
+    assert not (kwargs['out_dir']/'segmentations.json').exists()
 
 
 def test_reuse_skips_inference_keeps_source_and_output_distinct(recovery, monkeypatch):
     monkeypatch.setattr(easymode_inference,'run_inference',lambda **k:pytest.fail('inference called'))
     runner=external.Runner(dry_run=True)
-    result=orchestrate.easymode(**call_kwargs(recovery,runner),conversion_workers=2)
-    assert len(runner.log)==1
-    argv=runner.log[0]
-    for flag,val in [('--input','ribosome:easymode/job006@8.66'),('--output','ribosome:easymode/job007'),('--workers','2'),('--maxima-filter-size','9'),('--min-particle-size','1000'),('--max-particle-size','50000')]:assert argv[argv.index(flag)+1]==val
-    assert result['shards']['n_workers']==0 and result['shards']['recovery']['conversion_workers']==2
+    result=orchestrate.segment_easymode(**call_kwargs(recovery,runner))
+    assert runner.log==[]
+    assert result['session_id']=='job007' and result['segmentation_session']=='job006' and result['inference_skipped']
+    assert result['segmentation_uri']=='ribosome:easymode/job006@8.66' and result['recovery']['output_session']=='job007'
+    assert result['sharding']['n_workers']==0
 
 
-def test_real_branch_records_recovery_in_export_manifest(recovery, monkeypatch):
+def test_real_branch_records_recovery_in_the_segmentation_manifest(recovery, monkeypatch):
     monkeypatch.setattr(easymode_inference,'run_inference',lambda **k:pytest.fail('inference called'))
-    monkeypatch.setattr(orchestrate,'export_copick_picks',lambda **k:k)
     runner=external.Runner(dry_run=False)
     monkeypatch.setattr(runner,'run',lambda argv:runner.log.append(argv))
-    # merge_close_picks needs the copick object's radius; this fixture's fake copick root has no objects, and the
-    # test is about the recovery accounting, so the merge step is switched off here (covered in test_dedupe.py).
-    result=orchestrate.easymode(**call_kwargs(recovery,runner),conversion_workers=1,merge_close_picks=False)
-    assert result['picks_uri']=='ribosome:easymode/job007'
-    assert result['source']['segmentations']==['ribosome:easymode/job006@8.66']
-    assert result['source']['conversion_workers']==1 and result['source']['inference_skipped']
-    assert result['source']['recovery']['source_inference_manifest_sha256']
+    result=orchestrate.segment_easymode(**call_kwargs(recovery,runner))
+    assert runner.log==[] and result['status']=='complete'
+    assert result['segmentations']=={'ribosome':'ribosome:easymode/job006@8.66'}
+    assert result['inference_skipped'] and result['recovery']['source_inference_manifest_sha256']
+    assert result['runs']['a']['shape_zyx']==[4,6,8] and result['totals']=={'n_runs':2,'n_with_segmentation':2}
+    assert json.loads((recovery[0]['out_dir']/'segmentations.json').read_text())==result
 
 
-@pytest.mark.parametrize('workers', [-1,2.5,True])
-def test_worker_bound_rejects_invalid(recovery, workers):
-    with pytest.raises(ValueError,match='positive integer'):
-        orchestrate.easymode(**call_kwargs(recovery,external.Runner(dry_run=True)),conversion_workers=workers)
-
-
-def test_normal_inference_still_uses_64_threads_and_conversion_defaults_to_the_memory_bound(recovery, monkeypatch):
+def test_normal_inference_still_uses_64_threads(recovery, monkeypatch):
     seen={}
     def inference(**kwargs):
         seen.update(kwargs)
         return {'workers':[],'n_workers':8,'devices':['0'],'skipped_existing':[]}
     monkeypatch.setattr(easymode_inference,'run_inference',inference)
     runner=external.Runner(dry_run=True);opts=call_kwargs(recovery,runner);opts['reuse_segmentation_session']=''
-    orchestrate.easymode(**opts)
-    assert seen['threads']==64
-    # automatic bound: the fake copick root exposes no runs, so the volume size is unknown and the thread count stands
-    assert runner.log[0][runner.log[0].index('--workers')+1]=='64'
-    monkeypatch.setattr(orchestrate,'tomogram_voxels',lambda c,t,v:1022*1440*400)
-    monkeypatch.setattr(orchestrate,'job_memory_limit_bytes',lambda env=None:512*1024**3)
-    runner=external.Runner(dry_run=True);opts=call_kwargs(recovery,runner);opts['reuse_segmentation_session']=''
-    orchestrate.easymode(**opts)
-    assert runner.log[0][runner.log[0].index('--workers')+1]=='20'
-    assert runner.log[0][runner.log[0].index('--input')+1]=='ribosome:easymode/job007@8.66'
+    result=orchestrate.segment_easymode(**opts)
+    assert seen['threads']==64 and seen['session_id']=='job007' and seen['user_id']=='easymode'
+    assert result['segmentation_uri']=='ribosome:easymode/job007@8.66' and not result['inference_skipped']
 
 
 def test_cli_forwards_typed_controls(recovery,monkeypatch):
     seen={}
     def fake(**kwargs):seen.update(kwargs);return {'totals':{}}
-    monkeypatch.setattr(orchestrate,'easymode',fake)
-    args=['easymode','--config',str(recovery[0]['config']),'--out-dir',str(recovery[0]['out_dir']),'--voxel-size','8.66','--conversion-workers','1','--reuse-segmentation-session','job006']
+    monkeypatch.setattr(orchestrate,'segment_easymode',fake)
+    args=['segment-easymode','--config',str(recovery[0]['config']),'--out-dir',str(recovery[0]['out_dir']),'--voxel-size','8.66','--reuse-segmentation-session','job006','--require-particle-radius']
     result=CliRunner().invoke(cli.main,args)
     assert result.exit_code==0,result.output
-    assert seen['conversion_workers']==1 and seen['reuse_segmentation_session']=='job006'
-    args[args.index('--conversion-workers')+1]='-1'
-    assert CliRunner().invoke(cli.main,args).exit_code!=0
+    assert seen['reuse_segmentation_session']=='job006' and seen['require_particle_radius'] is True
+    assert CliRunner().invoke(cli.main,args[:-1]).exit_code==0 and seen['require_particle_radius'] is False

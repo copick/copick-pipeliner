@@ -9,6 +9,7 @@ from pathlib import Path
 import click
 
 from . import orchestrate
+from .coords import LAYOUTS
 from .external import Runner
 
 
@@ -40,7 +41,7 @@ def _common(func):
 @click.option("--object", "object_name", default="cytosolic ribosome")
 @click.option("--deposition-id", default=None)
 @click.option("--shape", type=click.Choice(["orientedpoint", "point"]), default="orientedpoint")
-@click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
+@click.option("--layout", type=click.Choice(list(LAYOUTS)), default="import_centered")
 @click.option("--user-id", default="data-portal")
 @click.option("--tomogram-id", default=None, help="Portal Tomograms/<id> defining the geometry (default: visualization default).")
 @click.option("--copick-object", default=None, help="Registered copick object to store the picks under (default: the annotation object name).")
@@ -95,45 +96,6 @@ def _gpu_options(func):
     return func
 
 
-@main.command()
-@_common
-@_gpu_options
-@click.option("--config", type=click.Path(exists=True, dir_okay=False), required=True)
-@click.option("--models", default="ribosome")
-@click.option("--tomo-type", default="wbp", help="copick tomogram type; an empty value reads the type the project records.")
-@click.option("--voxel-size", type=float, required=True)
-@click.option("--tta", type=int, default=4)
-@click.option("--threshold", type=float, default=0.5)
-@click.option("--batch-size", type=int, default=1)
-@click.option("--maxima-filter-size", type=int, default=10)
-@click.option("--min-particle-size", type=int, default=1000)
-@click.option("--max-particle-size", type=int, default=50000)
-@click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
-@click.option("--max-workers", type=int, default=None, help="Cap on copick-easymode's inference workers (default: one per visible GPU).")
-@click.option("--conversion-workers", type=click.IntRange(min=0), default=0, help="seg2picks workers; 0 = automatic (bounded by memory and volume size).")
-@click.option("--reuse-segmentation-session", default="", help="Completed sibling job's session whose segmentations are converted into this session; no inference.")
-@click.option("--merge-close-picks/--no-merge-close-picks", default=True, help="Merge picks closer than the minimum separation into one centre (default on).")
-@click.option("--min-separation-a", type=float, default=0.0, help="Minimum pick separation in A; 0 = 0.7 x the copick object's diameter.")
-@click.option("--conversion-backend", type=click.Choice(["octopi", "legacy_seg2picks"]), default="octopi", help="How segmentations become picks: Octopi's radius-aware localization (default) or copick-utils seg2picks (legacy, with --merge-close-picks).")
-@click.option("--localization-method", type=click.Choice(["watershed", "com"]), default="watershed", help="Octopi backend: watershed or connected-component centre of mass.")
-@click.option("--radius-min-scale", type=float, default=0.5, help="Octopi backend: minimum accepted radius as a fraction of the object radius (also its centroid-merge distance).")
-@click.option("--radius-max-scale", type=float, default=1.0, help="Octopi backend: maximum accepted radius as a fraction of the object radius.")
-@click.option("--xla/--no-xla", default=False, help="XLA-compiled inference (copick-easymode >= 0.5.0 --xla): one compiled forward pass per model; needs ptxas.")
-def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, models, tomo_type, voxel_size, tta, threshold, batch_size, maxima_filter_size, min_particle_size, max_particle_size, layout, max_workers, conversion_workers, reuse_segmentation_session, merge_close_picks, min_separation_a, conversion_backend, localization_method, radius_min_scale, radius_max_scale, xla):
-    """copick-easymode segmentation (its own worker per allocated GPU) -> localization -> particles.star."""
-    manifest = orchestrate.easymode(
-        config=Path(config), out_dir=Path(out_dir), session_id=session_id, models=[m.strip() for m in models.split(",") if m.strip()],
-        tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type), voxel_a=voxel_size, runs=_runs(runs), tta=tta, threshold=threshold, batch_size=batch_size,
-        maxima_filter_size=maxima_filter_size, min_particle_size=min_particle_size, max_particle_size=max_particle_size,
-        layout=layout, gpus=gpus, use_gpu=not no_gpu, threads=threads, runner=Runner(dry_run=dry_run), max_workers=max_workers,
-        conversion_workers=conversion_workers, reuse_segmentation_session=reuse_segmentation_session,
-        merge_close_picks=merge_close_picks, min_separation_a=min_separation_a,
-        conversion_backend=conversion_backend, localization_method=localization_method, radius_min_scale=radius_min_scale, radius_max_scale=radius_max_scale,
-        xla=xla,
-    )
-    click.echo(json.dumps(manifest.get("totals", manifest)))
-
-
 @main.command("segment-easymode")
 @_common
 @_gpu_options
@@ -147,15 +109,39 @@ def easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
 @click.option("--max-workers", type=int, default=None, help="Cap on parallel inference workers (default: one per visible GPU).")
 @click.option("--reuse-segmentation-session", default="", help="Completed sibling job's session whose verified segmentations this job records instead of running inference.")
 @click.option("--xla/--no-xla", default=False, help="XLA-compiled inference (copick-easymode >= 0.5.0 --xla): one compiled forward pass per model; needs ptxas.")
-def segment_easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, models, tomo_type, voxel_size, tta, threshold, batch_size, max_workers, reuse_segmentation_session, xla):
+@click.option("--require-particle-radius/--no-require-particle-radius", default=False, help="Refuse, before inference, a model whose pickable object is not a particle with a radius (the segmentation will be localized into picks).")
+def segment_easymode(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, models, tomo_type, voxel_size, tta, threshold, batch_size, max_workers, reuse_segmentation_session, xla, require_particle_radius):
     """copick-easymode segmentation only (one worker per allocated GPU) -> segmentations.json."""
     manifest = orchestrate.segment_easymode(
         config=Path(config), out_dir=Path(out_dir), session_id=session_id, models=[m.strip() for m in models.split(",") if m.strip()],
         tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type), voxel_a=voxel_size, runs=_runs(runs), tta=tta,
         threshold=threshold, batch_size=batch_size, gpus=gpus, use_gpu=not no_gpu, threads=threads, runner=Runner(dry_run=dry_run),
         max_workers=max_workers, reuse_segmentation_session=reuse_segmentation_session, xla=xla,
+        require_particle_radius=require_particle_radius,
     )
     click.echo(json.dumps(manifest["totals"]))
+
+
+@main.command()
+@_common
+@click.option("--config", type=click.Path(exists=True, dir_okay=False), required=True)
+@click.option("--in-segmentation", type=click.Path(exists=True, dir_okay=False), required=True, help="segmentations.json of a copick.segment.easymode job.")
+@click.option("--object", "object_name", default=None, help="Object to localize (default: the segmentation's primary object).")
+@click.option("--localization-method", type=click.Choice(["watershed", "com"]), default="watershed", help="Octopi's watershed or connected-component center of mass.")
+@click.option("--radius-min-scale", type=float, default=0.5, help="Minimum accepted radius as a fraction of the object radius (also Octopi's centroid-merge distance).")
+@click.option("--radius-max-scale", type=float, default=1.0, help="Maximum accepted radius as a fraction of the object radius.")
+@click.option("--maxima-filter-size", type=int, default=10, help="Octopi watershed filter size (voxels); unused by COM.")
+@click.option("--conversion-workers", type=click.IntRange(min=0), default=0, help="Localization workers; 0 = automatic (bounded by memory and volume size).")
+@click.option("--layout", type=click.Choice(list(LAYOUTS)), default="import_centered")
+def localize(out_dir, session_id, threads, runs, dry_run, config, in_segmentation, object_name, localization_method, radius_min_scale, radius_max_scale, maxima_filter_size, conversion_workers, layout):
+    """Octopi radius-aware localization of a verified segmentation -> picks -> particles.star."""
+    manifest = orchestrate.localize(
+        config=Path(config), out_dir=Path(out_dir), session_id=session_id, in_segmentation=Path(in_segmentation),
+        object_name=object_name, runs=_runs(runs), localization_method=localization_method, radius_min_scale=radius_min_scale,
+        radius_max_scale=radius_max_scale, maxima_filter_size=maxima_filter_size, conversion_workers=conversion_workers,
+        layout=layout, threads=threads, runner=Runner(dry_run=dry_run),
+    )
+    click.echo(json.dumps(manifest.get("totals", manifest)))
 
 
 def _seg2fil_options(func):
@@ -192,7 +178,7 @@ def trace_filaments(out_dir, session_id, threads, runs, dry_run, config, in_segm
 @click.option("--anchor", type=click.Choice(["center", "start"]), default=None, help="Unset keeps copick-utils' default (center).")
 @click.option("--roll", type=click.Choice(["parallel", "random"]), default=None, help="Unset keeps copick-utils' default (parallel).")
 @click.option("--seed", type=int, default=None, help="Random seed for --roll random.")
-@click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
+@click.option("--layout", type=click.Choice(list(LAYOUTS)), default="import_centered")
 def filament_picks(out_dir, session_id, threads, runs, dry_run, config, in_filaments, spacing_a, anchor, roll, seed, layout):
     """copick convert fil2picks over a verified trace -> picks -> particles.star (copick's export, filament columns)."""
     manifest = orchestrate.filament_picks(
@@ -216,7 +202,7 @@ def filament_picks(out_dir, session_id, threads, runs, dry_run, config, in_filam
 @click.option("--min-length", "min_length_a", type=float, default=None, help="Minimum filament length (A); unset keeps copick-helix's default (two segments).")
 @click.option("--seeds-only/--all-filaments", default=True, help="Dense picks for seed filaments only (polarity known).")
 @click.option("--every", type=int, default=1, help="Every n-th lattice point per dense pick.")
-@click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
+@click.option("--layout", type=click.Choice(list(LAYOUTS)), default="import_centered")
 def filament_polarity(out_dir, session_id, threads, runs, dry_run, config, in_filaments, family, tomo_type, voxel_size, tilt_min, tilt_max, tilt_axis, min_length_a, seeds_only, every, layout):
     """copick-helix polarity over a verified trace -> calls, reference.mrc, dense registered picks -> particles.star."""
     try:
@@ -241,7 +227,7 @@ def filament_polarity(out_dir, session_id, threads, runs, dry_run, config, in_fi
 @click.option("--boundary-voxel-size", type=float, default=20.0)
 @click.option("--model", default="tomogram-boundary")
 @click.option("--ntta", type=int, default=4)
-@click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
+@click.option("--layout", type=click.Choice(list(LAYOUTS)), default="import_centered")
 @click.option("--reuse-boundary-session", default="")
 def boundary(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, in_picks, tomo_type, voxel_size, boundary_voxel_size, model, ntta, layout, reuse_boundary_session):
     """octopi tomogram-boundary -> sample mask -> picksin -> particles.star."""
@@ -277,7 +263,7 @@ def membrain(out_dir, session_id, threads, runs, dry_run, gpus, no_gpu, config, 
 @click.option("--picks-uri", required=True, help="object:user_id/session_id")
 @click.option("--tomo-type", default="wbp", help="copick tomogram type; an empty value reads the type the project records.")
 @click.option("--voxel-size", type=float, required=True)
-@click.option("--layout", type=click.Choice(["import_centered", "relion5"]), default="import_centered")
+@click.option("--layout", type=click.Choice(list(LAYOUTS)), default="import_centered")
 @click.option("--filaments-uri", default=None, help="Filament picks: the Filaments (object:user/session) they were sampled from; "
               "writes RELION's filament columns with each filament's polarity.")
 def export_star(out_dir, session_id, threads, runs, dry_run, config, picks_uri, tomo_type, voxel_size, layout, filaments_uri):

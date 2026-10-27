@@ -17,7 +17,7 @@ one command and keeps what is the JOB's contract rather than sharding:
   copick-easymode's per-GPU workers, devices and resolved models sit beside it (``gpu_workers``,
   ``devices``, ``models_fetch``, ``easymode_report``).
 * ``InferenceError`` is raised when the tool exits non-zero, writes no report or a failed one, reports
-  errors, or any requested segmentation is missing afterwards -- before seg2picks/export can run on a
+  errors, or any requested segmentation is missing afterwards -- before the segmentation manifest records a
   partial set.
 """
 
@@ -42,7 +42,7 @@ ENV_VISIBLE = "CUDA_VISIBLE_DEVICES"
 
 
 class InferenceError(RuntimeError):
-    """easymode inference failed or left a requested segmentation missing: the job must not convert or export."""
+    """easymode inference failed or left a requested segmentation missing: the job must not record a partial result."""
 
 
 # ---- segmentation bookkeeping (copick API) ----------------------------------------------
@@ -226,7 +226,7 @@ def run_inference(
     if why:
         manifest["status"] = "failed"
         write_manifest(out_dir / MANIFEST, manifest)
-        raise InferenceError("easymode inference incomplete; not converting or exporting a partial result: " + "; ".join(why))
+        raise InferenceError("easymode inference incomplete; not recording a partial result: " + "; ".join(why))
     manifest["status"] = "complete"
     write_manifest(out_dir / MANIFEST, manifest)
     print(f"easymode inference: complete, {manifest['n_workers']} worker(s) on {manifest['devices'] or 'the CPU'}, "

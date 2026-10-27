@@ -1,5 +1,6 @@
 """copick-easymode runs one worker per GPU itself; the job runs ONE ``copick inference easymode``, skips what this
-session already segmented, reads the tool's report, and refuses to convert or export unless every segmentation exists."""
+session already segmented, reads the tool's report, and refuses to record a segmentation manifest unless every
+segmentation exists."""
 
 from __future__ import annotations
 
@@ -13,8 +14,7 @@ import pytest
 from copick_pipeliner import settings
 from copick_pipeliner.tools import easymode_inference, external, orchestrate
 
-COMMON = dict(models=["ribosome"], tomo_type="wbp", voxel_a=10.0, tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9,
-              min_particle_size=1000, max_particle_size=50000, layout="import_centered", conversion_backend="legacy_seg2picks")
+COMMON = dict(models=["ribosome"], tomo_type="wbp", voxel_a=10.0, tta=4, threshold=0.5, batch_size=1)
 
 
 def _project(tmp_path: Path, runs=("run_a", "run_b", "run_c"), shape=(4, 6, 8), voxel=10.0):
@@ -95,24 +95,24 @@ def test_one_invocation_carries_the_jobs_devices_limits_model_directory_and_repo
     config, _ = _project(tmp_path, runs=("a", "b", "c", "d", "e"))
     monkeypatch.setenv(settings.ENV_EASYMODE_MODELS, str(tmp_path / "models"))
     runner = external.Runner(dry_run=True)
-    out_dir = tmp_path / "AutoPick/job007"
-    result = orchestrate.easymode(config=config, out_dir=out_dir, session_id="job007", runs=None, gpus="1,3", use_gpu=True, threads=16,
-                                  max_workers=2, runner=runner, **COMMON)
-    argv = runner.log[0]
-    assert argv[1:3] == ["inference", "easymode"] and runner.log[1][1:3] == ["convert", "seg2picks"]       # one invocation, then conversion
+    out_dir = tmp_path / "Segment/job007"
+    result = orchestrate.segment_easymode(config=config, out_dir=out_dir, session_id="job007", runs=None, gpus="1,3", use_gpu=True,
+                                          threads=16, max_workers=2, runner=runner, **COMMON)
+    (argv,) = runner.log
+    assert argv[1:3] == ["inference", "easymode"]                                                          # one invocation
     assert _once(argv, "-r") == "a,b,c,d,e" and _once(argv, "--gpus") == "1,3" and "--cpu" not in argv
     assert _once(argv, "--max-workers") == "2" and _once(argv, "--threads") == "16"
     assert _once(argv, "--model-dir") == str(tmp_path / "models") and _once(argv, "--report") == str(out_dir / easymode_inference.REPORT)
     assert _once(argv, "--session-id") == "job007" and _once(argv, "--user-id") == "easymode" and _once(argv, "-c") == str(config)
     assert _once(argv, "--tta") == "4" and _once(argv, "--threshold") == "0.5" and _once(argv, "--batch-size") == "1" and "--no-add-objects" in argv
-    plan = result["shards"]
+    plan = json.loads((out_dir / easymode_inference.MANIFEST).read_text())
     assert plan["status"] == "dry run" and plan["workers"][0]["argv"] == argv and plan["workers"][0]["runs"] == ["a", "b", "c", "d", "e"]
-    assert json.loads((out_dir / easymode_inference.MANIFEST).read_text())["status"] == "dry run"
+    assert result["status"] == "dry run" and result["sharding"]["status"] == "dry run"
     # No GPU: one CPU worker, never --gpus; nothing configured: copick-easymode's own defaults.
     monkeypatch.delenv(settings.ENV_EASYMODE_MODELS)
     cpu = external.Runner(dry_run=True)
-    orchestrate.easymode(config=config, out_dir=tmp_path / "AutoPick/job008", session_id="job008", runs=["a"], gpus="0", use_gpu=False,
-                         threads=None, runner=cpu, **COMMON)
+    orchestrate.segment_easymode(config=config, out_dir=tmp_path / "Segment/job008", session_id="job008", runs=["a"], gpus="0",
+                                 use_gpu=False, threads=None, runner=cpu, **COMMON)
     argv = cpu.log[0]
     assert "--cpu" in argv and "--gpus" not in argv and _once(argv, "-r") == "a"
     assert not {"--max-workers", "--threads", "--model-dir"} & set(argv)
@@ -173,17 +173,17 @@ def test_xla_reaches_copick_easymode_and_its_fallbacks_are_recorded(tmp_path, mo
      r"model\(s\) not available in /models/easymode: ribosome: not in"),
     ("missing segmentation", dict(), {"run_a"}, r"2 run\(s\) have no segmentation for every model in session job007: run_b, run_c"),
 ])
-def test_an_incomplete_inference_stops_the_job_before_conversion_and_export(tmp_path, monkeypatch, case, fake, lookup, match):
+def test_an_incomplete_inference_stops_the_job_before_its_segmentation_manifest(tmp_path, monkeypatch, case, fake, lookup, match):
     config, _ = _project(tmp_path)
     monkeypatch.setenv(settings.ENV_COPICK, str(_fake_copick(tmp_path / "bin", **fake)))
     monkeypatch.setattr(easymode_inference, "complete_runs", _nothing_then(lookup))
     runner = external.Runner()
-    out_dir = tmp_path / "AutoPick/job007"
+    out_dir = tmp_path / "Segment/job007"
     with pytest.raises(easymode_inference.InferenceError, match=match):
-        orchestrate.easymode(config=config, out_dir=out_dir, session_id="job007", runs=None, gpus=None, use_gpu=True, threads=None,
-                             runner=runner, **COMMON)
-    assert [a[1:3] for a in runner.log] == [["inference", "easymode"]]                    # nothing converted
-    assert not (out_dir / "particles.star").exists()                                       # nothing exported
+        orchestrate.segment_easymode(config=config, out_dir=out_dir, session_id="job007", runs=None, gpus=None, use_gpu=True,
+                                     threads=None, runner=runner, **COMMON)
+    assert [a[1:3] for a in runner.log] == [["inference", "easymode"]]                    # nothing after the inference
+    assert not (out_dir / "segmentations.json").exists()                                   # nothing recorded
     manifest = json.loads((out_dir / easymode_inference.MANIFEST).read_text())
     assert manifest["status"] == "failed"
     if case == "missing segmentation":
@@ -234,12 +234,12 @@ def test_a_star_derived_voxel_size_is_snapped_to_the_projects_stored_spacing(tmp
     assert orchestrate.snap_voxel_size(config, 8.66) == 8.66                                  # nothing near: unchanged
     assert easymode_inference.complete_runs(config, ["run_a"], ["ribosome"], user_id="easymode", session_id="job007", voxel_a=10.005) == {"run_a"}
     # Through the orchestration: the dry-run plan is made at the stored spacing and records both values.
-    result = orchestrate.easymode(conversion_backend="legacy_seg2picks", 
-        config=config, out_dir=tmp_path / "AutoPick/job007", session_id="job007", models=["ribosome"], tomo_type="wbp", voxel_a=requested,
-        runs=None, tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000,
-        layout="import_centered", gpus=None, use_gpu=True, threads=None, runner=external.Runner(dry_run=True))
-    assert result["shards"]["voxel_size_a"] == 10.005
-    argv = result["shards"]["workers"][0]["argv"]
+    out_dir = tmp_path / "Segment/job007"
+    result = orchestrate.segment_easymode(
+        config=config, out_dir=out_dir, session_id="job007", models=["ribosome"], tomo_type="wbp", voxel_a=requested,
+        runs=None, tta=4, threshold=0.5, batch_size=1, gpus=None, use_gpu=True, threads=None, runner=external.Runner(dry_run=True))
+    assert result["voxel_size_a"] == 10.005 and result["voxel_size_requested_a"] == requested
+    argv = json.loads((out_dir / easymode_inference.MANIFEST).read_text())["workers"][0]["argv"]
     assert argv[argv.index("-t") + 1] == "wbp@10.005"
     # Ambiguity is refused rather than guessed.
     run = root.get_run("run_a"); run.new_voxel_spacing(10.006)
@@ -248,8 +248,8 @@ def test_a_star_derived_voxel_size_is_snapped_to_the_projects_stored_spacing(tmp
 
 
 def test_every_picking_verb_snaps_the_requested_sampling_first(tmp_path, monkeypatch):
-    """The stored-spacing match must run at the entry of easymode, boundary AND membrain (S070 follow-up:
-    the boundary call was missing from 0.1.7's diff)."""
+    """The stored-spacing match must run at the entry of the easymode segmentation, boundary AND membrain (S070
+    follow-up: the boundary call was missing from 0.1.7's diff)."""
     calls = []
 
     def spy(config, voxel_a, **kw):
@@ -260,11 +260,11 @@ def test_every_picking_verb_snaps_the_requested_sampling_first(tmp_path, monkeyp
     config, _ = _project(tmp_path, runs=("run_a",), voxel=10.005)
     requested = 7.46085 * 1.341
     common = dict(config=config, session_id="job008", tomo_type="wbp", voxel_a=requested, runs=["run_a"], gpus=None, use_gpu=True)
-    orchestrate.easymode(conversion_backend="legacy_seg2picks", out_dir=tmp_path / "AutoPick/job008", models=["ribosome"], tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9,
-                         min_particle_size=1000, max_particle_size=50000, layout="import_centered", threads=None,
-                         runner=external.Runner(dry_run=True), **common)
+    orchestrate.segment_easymode(out_dir=tmp_path / "Segment/job008", models=["ribosome"], tta=4, threshold=0.5, batch_size=1,
+                                 threads=None, runner=external.Runner(dry_run=True), **common)
     picks_dir = tmp_path / "AutoPick/job008"
-    (picks_dir / "picks_manifest.json").write_text(json.dumps({"kind": "copick-pipeliner/picks", "runs": {"run_a": {"picks_uri": "ribosome:easymode/job008"}}}))
+    picks_dir.mkdir(parents=True)
+    (picks_dir / "picks_manifest.json").write_text(json.dumps({"kind": "copick-pipeliner/picks", "runs": {"run_a": {"picks_uri": "ribosome:octopi/job008"}}}))
     (picks_dir / "particles.star").write_text("data_particles\n\nloop_\n_rlnTomoName\nrun_a\n")
     orchestrate.boundary(out_dir=tmp_path / "AutoPick/job009", in_picks=picks_dir / "particles.star", boundary_voxel_a=20.0, model="tomogram-boundary",
                          ntta=4, layout="import_centered", threads=None, runner=external.Runner(dry_run=True), **common)
@@ -272,9 +272,10 @@ def test_every_picking_verb_snaps_the_requested_sampling_first(tmp_path, monkeyp
     assert calls == [round(requested, 9)] * 3
 
 
-def test_seg2picks_workers_are_bounded_by_memory_and_volume_size(tmp_path, monkeypatch):
+def test_per_volume_workers_are_bounded_by_memory_and_volume_size():
     """10426 AutoPick/job006: 64 seg2picks workers on 1022x1440x400 volumes reached 536 GB in a 512 GiB job and were
-    OOM-killed after all inference had finished; the Hutchings 548x772x320 volumes fit. Workers now follow the memory."""
+    OOM-killed after all inference had finished; the Hutchings 548x772x320 volumes fit. Workers now follow the memory
+    (the localization and the trace use this bound; ``test_localize`` runs it through the localization)."""
     gib = 1024 ** 3
     big, small = 1022 * 1440 * 400, 548 * 772 * 320
     w, acc = orchestrate.bounded_workers(64, big, 512 * gib)
@@ -286,17 +287,6 @@ def test_seg2picks_workers_are_bounded_by_memory_and_volume_size(tmp_path, monke
     assert orchestrate.bounded_workers(None, big, 512 * gib)[0] is None                # no thread count: tool default
     assert orchestrate.job_memory_limit_bytes({"SLURM_MEM_PER_NODE": "524288"}) == 512 * gib
     assert orchestrate.job_memory_limit_bytes({"SLURM_MEM_PER_CPU": "8192", "SLURM_CPUS_PER_TASK": "64"}) == 512 * gib
-    # Through the verb (dry run): the composed seg2picks command carries the bounded worker count and the manifest the accounting.
-    config, _ = _project(tmp_path, runs=("a", "b"), voxel=8.66)
-    monkeypatch.setattr(orchestrate, "tomogram_voxels", lambda config, tomo_type, voxel_a: big)
-    monkeypatch.setattr(orchestrate, "job_memory_limit_bytes", lambda env=None: 512 * gib)
-    runner = external.Runner(dry_run=True)
-    orchestrate.easymode(
-        config=config, out_dir=tmp_path / "AutoPick/job006", session_id="job006", models=["ribosome"], tomo_type="wbp", voxel_a=8.66, runs=None,
-        tta=4, threshold=0.5, batch_size=1, maxima_filter_size=9, min_particle_size=1000, max_particle_size=50000, layout="import_centered",
-        gpus=None, use_gpu=True, threads=64, runner=runner, conversion_backend="legacy_seg2picks")
-    seg2picks = next(a for a in runner.log if a[1:3] == ["convert", "seg2picks"])
-    assert seg2picks[seg2picks.index("--workers") + 1] == "20"
 
 
 def test_tomogram_voxels_reads_only_the_array_metadata(tmp_path):

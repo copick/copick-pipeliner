@@ -11,7 +11,7 @@ from pipeliner.nodes import NODE_PARAMSDATA, NODE_PARTICLEGROUPMETADATA, NODE_PR
 
 from copick_pipeliner.jobs._common import PICKS_MANIFEST, PARTICLES_NODE, session_id_for
 
-JOB_TYPES = ("copick.project", "copick.portalpicks", "copick.easymode", "copick.boundary", "copick.membrain",
+JOB_TYPES = ("copick.project", "copick.portalpicks", "copick.localize.octopi", "copick.boundary", "copick.membrain",
              "copick.segment.easymode", "copick.filaments.trace", "copick.filaments.picks", "copick.filaments.polarity")
 UNSAFE = set(";|&$`><\n")
 
@@ -39,7 +39,7 @@ def test_registry_lists_them_all():
 
 
 def test_picking_jobs_register_star_and_manifest_nodes():
-    for job_type in ("copick.portalpicks", "copick.easymode", "copick.boundary", "copick.filaments.picks",
+    for job_type in ("copick.portalpicks", "copick.localize.octopi", "copick.boundary", "copick.filaments.picks",
                      "copick.filaments.polarity"):
         job = new_job_of_type(job_type)
         job.output_dir = "AutoPick/job004/"
@@ -106,20 +106,18 @@ def test_portalpicks_command_names_the_attempt_and_layout(fake_executables):
     assert not any(any(ch in UNSAFE for ch in a) for a in argv)
 
 
-def test_easymode_command_carries_gpu_and_seg2picks_settings(fake_executables):
-    job = new_job_of_type("copick.easymode")
-    job.joboptions["conversion_backend"].value="legacy_seg2picks"
-    job.output_dir = "AutoPick/job005/"
+def test_localize_command_binds_the_segmentation_and_runs_on_the_cpu(fake_executables):
+    job = new_job_of_type("copick.localize.octopi")
+    job.output_dir = "AutoPick/job010/"
     job.joboptions["copick_config"].value = "Copick/job003/copick_config.json"
-    job.joboptions["voxel_size"].value = 8.66
-    job.joboptions["gpu_ids"].value = "0"
+    job.joboptions["in_segmentation"].value = "Segment/job009/segmentations.json"
     argv = _argv(job)
-    assert argv[1] == "easymode"
-    assert argv[argv.index("--voxel-size") + 1] == "8.66"
-    assert argv[argv.index("--gpus") + 1] == "0"
-    assert argv[argv.index("--min-particle-size") + 1] == "1000"
-    job.joboptions["use_gpu"].value = False
-    assert "--no-gpu" in _argv(job)
+    assert argv[1] == "localize" and argv[argv.index("--session-id") + 1] == "job010"
+    assert argv[argv.index("--in-segmentation") + 1] == "Segment/job009/segmentations.json"
+    assert argv[argv.index("--localization-method") + 1] == "watershed" and argv[argv.index("--layout") + 1] == "import_centered"
+    assert "use_gpu" not in job.joboptions and "--no-gpu" not in argv and "--gpus" not in argv
+    assert job.joboptions["star_layout"].choices == ["import_centered", "relion5", "merged"]
+    assert not any(any(ch in UNSAFE for ch in a) for a in argv)
 
 
 def test_boundary_command_points_at_upstream_star(fake_executables):
@@ -193,6 +191,24 @@ def test_the_filament_chain_binds_by_registered_node_types():
     assert boundary_in.node_type == polarity[PARTICLES_NODE].toplevel_type
 
 
+def test_the_particle_chain_binds_by_registered_node_types():
+    """segment -> localize -> boundary: the localization binds the segmentation manifest a trace binds."""
+    segment = new_job_of_type("copick.segment.easymode")
+    segment.output_dir = "Segment/job009/"
+    segment.create_output_nodes()
+    (manifest,) = segment.output_nodes
+    localize = new_job_of_type("copick.localize.octopi")
+    localize.output_dir = "AutoPick/job010/"
+    localize.create_output_nodes()
+    by_name = {n.name.split("/")[-1]: n for n in localize.output_nodes}
+    assert by_name[PARTICLES_NODE].type == "ParticleGroupMetadata.star.copick.picks.localize"
+    assert by_name[PICKS_MANIFEST].type == "ProcessData.json.copick.manifest.picks.localize"
+    localize_in = localize.joboptions["in_segmentation"]
+    assert localize_in.node_type == NODE_PROCESSDATA and localize_in.node_kwds == ["copick", "manifest", "segmentation"]
+    assert set(localize_in.node_kwds) <= set(manifest.kwds)
+    assert new_job_of_type("copick.boundary").joboptions["in_picks"].node_type == by_name[PARTICLES_NODE].toplevel_type
+
+
 def test_segment_command(fake_executables):
     job = new_job_of_type("copick.segment.easymode")
     job.output_dir = "Segment/job009/"
@@ -203,6 +219,10 @@ def test_segment_command(fake_executables):
     assert argv[argv.index("--models") + 1] == "microtubule" and argv[argv.index("--voxel-size") + 1] == "10.005"
     assert "--reuse-segmentation-session" not in argv and "--layout" not in argv   # segmentation only: no STAR
     assert "--no-xla" in argv and "--xla" not in argv                                # copick-easymode's opt-in default
+    assert "--no-require-particle-radius" in argv and job.joboptions["require_particle_radius"].default_value is False
+    job.joboptions["require_particle_radius"].value = "Yes"
+    assert "--require-particle-radius" in _argv(job) and "--no-require-particle-radius" not in _argv(job)
+    job.joboptions["require_particle_radius"].value = "No"
     job.joboptions["use_xla"].value = "Yes"
     assert "--xla" in _argv(job) and "--no-xla" not in _argv(job)
     job.joboptions["use_xla"].value = "No"
@@ -284,10 +304,11 @@ def test_job_definitions_load_without_copick(tmp_path):
     code = (
         "import sys; sys.modules['copick'] = None\n"
         "import importlib\n"
-        "for m in ('project', 'portalpicks', 'easymode', 'boundary', 'membrain', 'segment', 'filaments'):\n"
+        "for m in ('project', 'portalpicks', 'localize', 'boundary', 'membrain', 'segment', 'filaments'):\n"
         "    importlib.import_module('copick_pipeliner.jobs.' + m)\n"
         "from pipeliner.job_factory import new_job_of_type\n"
-        "for t in ('copick.segment.easymode', 'copick.filaments.trace', 'copick.filaments.picks', 'copick.filaments.polarity'):\n"
+        "for t in ('copick.segment.easymode', 'copick.localize.octopi', 'copick.filaments.trace', 'copick.filaments.picks',\n"
+        "          'copick.filaments.polarity'):\n"
         "    new_job_of_type(t)\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True, cwd=tmp_path)
