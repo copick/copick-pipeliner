@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/copick/copick-pipeliner/compare/copick-pipeliner-v0.4.0...copick-pipeliner-v0.5.0) (2026-10-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* copick.easymode and the legacy_seg2picks backend are removed; run copick.segment.easymode, then copick.localize.octopi.
+
+### ✨ Features
+
+* a separate Octopi localization job; remove copick.easymode ([c84cb27](https://github.com/copick/copick-pipeliner/commit/c84cb27acba2b8a774c5ad8dd4804aa84d5a5139))
+
 ## [0.4.0](https://github.com/copick/copick-pipeliner/compare/copick-pipeliner-v0.3.0...copick-pipeliner-v0.4.0) (2026-10-21)
 
 
