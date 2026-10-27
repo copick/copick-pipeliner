@@ -19,4 +19,4 @@ control process without copick, TensorFlow or torch. All scientific work happens
 environment and shells out to ``copick`` / ``octopi``.
 """
 
-__version__ = "0.4.0"  # x-release-please-version
+__version__ = "0.5.0"  # x-release-please-version
