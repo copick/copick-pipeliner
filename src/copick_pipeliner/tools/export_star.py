@@ -9,7 +9,7 @@ track lengths and per-filament polarity):
   (``write_relion_import_bundle``, ``write_star_particles``).
 
 What stays here is the choice of what to export and in which geometry, the lineage checks, and the manifest
-(``picks_manifest.json``) ApexAgent's extractor reads. Two layouts (``coords.LAYOUTS``), both with **centered Angstrom
+(``picks_manifest.json``) ApexAgent's extractor reads. Three layouts (``coords.LAYOUTS``), all with **centered Angstrom
 coordinates only** (``coordinates="centered"``: a run without a tomogram center is an error, never a legacy pixel
 fallback):
 
@@ -24,6 +24,10 @@ fallback):
 ``relion5``
     One flat file: ``data_particles`` plus, when every run's tilt-series pixel size is known, ``data_optics`` with
     one group per run, for a direct ``relion.pseudosubtomo.in_particles`` binding.
+``merged``
+    One flat file with one ``data_particles`` table, no ``data_optics`` and no ``rlnOpticsGroup``: the table
+    ``relion_tomo_import_coordinates`` writes, i.e. the ``import_centered`` bundle's per-run tables joined. copick's
+    ``particles`` layout with ``include_optics=False``.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ import starfile
 from . import portal_annotations as portal
 from .coords import (
     LAYOUT_IMPORT_CENTERED,
+    LAYOUT_MERGED,
     LAYOUT_RELION5,
     LAYOUTS,
     VolumeGeometry,
@@ -51,7 +56,7 @@ PICKS_MANIFEST = "picks_manifest.json"
 COORDINATES_DIR = "coordinates"
 INDEX_BLOCK = "coordinate_files"
 #: The layout names here (and in ApexAgent's presets and manifests) -> copick's.
-COPICK_LAYOUTS = {LAYOUT_IMPORT_CENTERED: "import", LAYOUT_RELION5: "particles"}
+COPICK_LAYOUTS = {LAYOUT_IMPORT_CENTERED: "import", LAYOUT_RELION5: "particles", LAYOUT_MERGED: "particles"}
 #: What the Euler angles of an export are: measurements, an initialization (identity rotations written as 0, 0, 0),
 #: the filament frame (``rlnTomoSubtomogram*`` = the frame, ``rlnAngle*`` = 0, 90, 0 with priors), or filament picks'
 #: lattice-registered poses (``rlnAngle*`` = each pick's rotation, no subtomogram or prior columns; copick-helix).
@@ -66,6 +71,12 @@ def _copick_layout(layout: str) -> str:
     if layout not in LAYOUTS:
         raise ValueError(f"unknown STAR layout {layout!r}; choose one of {LAYOUTS}")
     return COPICK_LAYOUTS[layout]
+
+
+def _with_optics(layout: str) -> bool:
+    """Whether copick is asked for an optics table (written when every run's tilt-series pixel size is known): for
+    ``relion5`` only. ``merged`` is copick's ``particles`` layout without one, and the index bundle has none."""
+    return layout == LAYOUT_RELION5
 
 
 def particles_path(out_dir) -> str:
@@ -98,8 +109,8 @@ def write_array_tables(
     particles, optics = build_relion_star_tables(
         runs,
         tomogram_centers={name: geometry_by_run[name].center_a for name in runs},
-        tilt_series_pixel_size=known_tilt if copick_layout == "particles" else None,
-        include_optics=copick_layout == "particles",
+        tilt_series_pixel_size=known_tilt if _with_optics(layout) else None,
+        include_optics=_with_optics(layout),
         coordinates="centered",
     )
     path = particles_path(out_dir)
@@ -152,7 +163,7 @@ def resolve_index_file(index_path: Path, entry: str) -> Path:
 
 
 def read_particles_star(path: Path) -> pd.DataFrame:
-    """Every particle row behind a STAR: the flat ``relion5`` table, or the concatenation
+    """Every particle row behind a STAR: the flat ``relion5`` or ``merged`` table, or the concatenation
     of an ``import_centered`` index's per-run files (with the index's ``rlnTomoName``
     checked against each file's own column)."""
     path = Path(path)
@@ -251,15 +262,15 @@ def _tilt_pixel_size_record(per_run: dict, layout: str, manifest: dict) -> float
     """The tilt-series sampling the manifest states for the whole export: the one value every run states, else None.
 
     copick writes one optics group per run, so runs may differ; the ``relion5`` optics table is written only when
-    every run states a value (a run without a tilt-series record must not borrow another run's). The index bundle has
-    no optics table; every run's value is recorded in the manifest either way.
+    every run states a value (a run without a tilt-series record must not borrow another run's). The index bundle and
+    the ``merged`` table have no optics table; every run's value is recorded in the manifest either way.
     """
     unknown = sorted(run for run, value in per_run.items() if value is None)
     known = {value for value in per_run.values() if value is not None}
     if unknown:
         manifest["notes"].append(
-            ("rlnTomoTiltSeriesPixelSize unknown for " if layout == LAYOUT_IMPORT_CENTERED
-             else "no optics table (RELION builds it from tomograms.star): no tilt-series record for ")
+            ("no optics table (RELION builds it from tomograms.star): no tilt-series record for " if _with_optics(layout)
+             else "rlnTomoTiltSeriesPixelSize unknown for ")
             + ", ".join(unknown) + (f" (the other runs state {sorted(known)})" if known else "")
         )
         return None
@@ -626,8 +637,8 @@ def export_copick_picks(
             root, picks_uri, particles_path(out_dir),
             voxel_spacing=float(voxel_a), run_names=included, layout=copick_layout, tomo_type=tomo_type,
             tilt_series_pixel_size={r: v for r, v in tilt_by_run.items() if r in included and v is not None}
-            if copick_layout == "particles" else None,
-            coordinates="centered", include_optics=True, filament_columns="on" if filament else "off",
+            if _with_optics(layout) else None,
+            coordinates="centered", include_optics=_with_optics(layout), filament_columns="on" if filament else "off",
             polarity_from_filaments=filament, filaments_uri=filaments_uri, allow_empty=True, **filament_options,
         )
     except ValueError as exc:

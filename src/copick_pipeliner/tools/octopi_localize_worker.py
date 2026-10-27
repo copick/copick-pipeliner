@@ -11,7 +11,7 @@ from pathlib import Path
 import traceback
 import numpy as np
 from .octopi_localization import radius_settings
-from .segmentation_reuse import validate_session
+from .segmentation_reuse import SESSION_TOKEN, validate_session
 
 
 def convert_one(spec):
@@ -20,10 +20,10 @@ def convert_one(spec):
     from octopi.extract.localize import extract_coordinates
     run_name=spec['run'];root=copick.from_file(spec['config']);run=root.get_run(run_name)
     if run is None:raise ValueError(f'Missing requested run {run_name}')
-    if run.get_picks(object_name=spec['model'],user_id='easymode',session_id=spec['output_session']):
+    if run.get_picks(object_name=spec['model'],user_id=spec['output_user'],session_id=spec['output_session']):
         raise ValueError(f'Refusing pre-existing output pick set for {run_name}; use a fresh job session')
     geometry=radius_settings(spec['config'],[spec['model']],spec['voxel_size'],spec['method'],spec['radius_min_scale'],spec['radius_max_scale'],spec['filter_size'])[spec['model']]
-    seg=readers.segmentation(run,float(spec['voxel_size']),spec['model'],user_id='easymode',session_id=spec['source_session'],raise_error=True)
+    seg=readers.segmentation(run,float(spec['voxel_size']),spec['model'],user_id=spec['source_user'],session_id=spec['source_session'],raise_error=True)
     if seg is None:raise ValueError(f'Missing source segmentation for {run_name}')
     # This is the exact installed Octopi algorithm, including spherical volume
     # filtering, centroid merging and border rejection. No algorithm is reproduced.
@@ -31,7 +31,7 @@ def convert_one(spec):
     points=np.asarray(points,dtype=float).reshape(-1,3)
     if not np.isfinite(points).all():raise ValueError(f'Nonfinite Octopi coordinates for {run_name}')
     xyz=points[:,[2,1,0]]*spec['voxel_size']
-    picks=run.new_picks(object_name=spec['model'],session_id=spec['output_session'],user_id='easymode',exist_ok=False)
+    picks=run.new_picks(object_name=spec['model'],session_id=spec['output_session'],user_id=spec['output_user'],exist_ok=False)
     transforms=np.tile(np.eye(4),(len(xyz),1,1))
     picks.from_numpy(xyz,transforms)
     picks.store()  # Explicit empty pick sets are real outputs, never implicit success.
@@ -45,17 +45,19 @@ def write_report(path,data):
 
 def main():
     ap=argparse.ArgumentParser()
-    for name in ('config','report','runs','model','source-session','output-session'):ap.add_argument('--'+name,required=True)
+    for name in ('config','report','runs','model','source-user','source-session','output-user','output-session'):ap.add_argument('--'+name,required=True)
     ap.add_argument('--voxel-size',type=float,required=True);ap.add_argument('--method',choices=['watershed','com'],required=True)
     ap.add_argument('--radius-min-scale',type=float,required=True);ap.add_argument('--radius-max-scale',type=float,required=True)
     ap.add_argument('--filter-size',type=int,required=True);ap.add_argument('--workers',type=int,required=True)
     args=vars(ap.parse_args());runs=[r for r in args.pop('runs').split(',') if r];path=args.pop('report');workers=args.pop('workers')
     validate_session(args['source_session']);validate_session(args['output_session'])
+    if not all(SESSION_TOKEN.fullmatch(args[k]) for k in ('source_user','output_user')):raise ValueError('source and output users must be safe tokens')
     if not runs or len(runs)!=len(set(runs)) or workers<1:raise ValueError('Unique selected runs and positive workers required')
     geometry=radius_settings(args['config'],[args['model']],args['voxel_size'],args['method'],args['radius_min_scale'],args['radius_max_scale'],args['filter_size'])
     from octopi.extract.localize import extract_coordinates
     source=Path(inspect.getsourcefile(extract_coordinates))
-    report={'status':'running','model':args['model'],'source_session':args['source_session'],'output_session':args['output_session'],
+    report={'status':'running','model':args['model'],'source_user':args['source_user'],'source_session':args['source_session'],
+            'output_user':args['output_user'],'output_session':args['output_session'],
             'config':str(Path(args['config']).resolve()),'conversion_workers':workers,'localization':geometry,
             'octopi_version':importlib.metadata.version('octopi'),'algorithm_module':'octopi.extract.localize.extract_coordinates',
             'algorithm_source':str(source),'algorithm_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),'runs':{}}

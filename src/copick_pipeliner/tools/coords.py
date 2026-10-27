@@ -10,7 +10,7 @@ files are written by copick's export (see ``export_star``), which implements the
 ``rlnCenteredCoordinate{X,Y,Z}Angst = (p_px - dim_px/2) * voxel``, angles ``Rotation.from_matrix(inv(m))
 .as_euler("ZYZ")``); ``tests/test_coords.py`` pins copick's output to it.
 
-Two STAR layouts are written (``LAYOUTS``), both with the native RELION 5 centered columns only (verified against the
+Three STAR layouts are written (``LAYOUTS``), all with the native RELION 5 centered columns only (verified against the
 installed ``relion_tomo_import_coordinates`` on 2026-09-22: the importer reads a STAR natively and its
 ``--centered/--scale_factor`` flags apply to ASCII inputs only):
 
@@ -19,6 +19,8 @@ installed ``relion_tomo_import_coordinates`` on 2026-09-22: the importer reads a
                      ``data_particles`` block.
 ``relion5``          one flat ``data_particles`` (+ ``data_optics``) file, for a direct
                      ``relion.pseudosubtomo.in_particles`` binding.
+``merged``           one flat ``data_particles`` file with no optics block and no ``rlnOpticsGroup``: the table
+                     ``relion_tomo_import_coordinates`` writes, i.e. the bundle's per-run tables joined.
 
 Uncentered coordinates are never written.
 """
@@ -31,7 +33,8 @@ import numpy as np
 
 LAYOUT_IMPORT_CENTERED = "import_centered"
 LAYOUT_RELION5 = "relion5"
-LAYOUTS = (LAYOUT_IMPORT_CENTERED, LAYOUT_RELION5)
+LAYOUT_MERGED = "merged"
+LAYOUTS = (LAYOUT_IMPORT_CENTERED, LAYOUT_RELION5, LAYOUT_MERGED)
 
 EULER_COLUMNS = ("rlnAngleRot", "rlnAngleTilt", "rlnAnglePsi")
 CENTERED_COLUMNS = ("rlnCenteredCoordinateXAngst", "rlnCenteredCoordinateYAngst", "rlnCenteredCoordinateZAngst")

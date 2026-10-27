@@ -40,8 +40,8 @@ from copick_pipeliner import settings
 
 CATEGORY_LABEL = "Particle Picking (copick)"
 
-#: The two RELION STAR layouts the exporter writes (see tools/coords.py).
-LAYOUTS = ("import_centered", "relion5")
+#: The three RELION STAR layouts the exporter writes (see tools/coords.py).
+LAYOUTS = ("import_centered", "relion5", "merged")
 DEFAULT_LAYOUT = "import_centered"
 
 CONFIG_NODE = "copick_config.json"
@@ -168,7 +168,9 @@ class CopickJobBase(PipelinerJob):
                 "import_centered: the bundle relion.importtomo.coordinates reads in STAR mode, an index "
                 "particles.star (data_coordinate_files) naming one coordinates/<run>.star per run, each with "
                 "rlnCenteredCoordinate{X,Y,Z}Angst. relion5: one flat data_optics + data_particles file with "
-                "the same centered columns, for a direct relion.pseudosubtomo in_particles binding. Both are "
+                "the same centered columns, for a direct relion.pseudosubtomo in_particles binding. merged: one "
+                "data_particles table with no optics block and no rlnOpticsGroup, the table "
+                "relion_tomo_import_coordinates writes (the import_centered per-run tables joined). All three are "
                 "written by copick's RELION export."
             ),
         )

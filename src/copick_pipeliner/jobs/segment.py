@@ -1,22 +1,29 @@
 """``copick.segment.easymode``: easymode segmentation only, recorded in ``segmentations.json``.
 
-Runs ``copick inference easymode`` (pretrained easymode models, TensorFlow) through the same inference step as
-``copick.easymode`` -- copick-easymode runs one worker per allocated GPU and resolves the weights once; a failed run
-or a missing segmentation fails the job -- and stops there: no picks, no STAR. The manifest names, per run and model, the
-segmentation URI and its verified array metadata, the weights resolved, and the inference settings; a filament trace
-(``copick.filaments.trace``) binds to it. GPU job; belongs in the picking TensorFlow image.
+Runs ``copick inference easymode`` (pretrained easymode models, TensorFlow) -- copick-easymode runs one worker per
+allocated GPU and resolves the weights once; a failed run or a missing segmentation fails the job -- and stops there:
+no picks, no STAR. The manifest names, per run and model, the segmentation URI and its verified array metadata, the
+weights resolved, and the inference settings; a filament trace (``copick.filaments.trace``) or an Octopi localization
+(``copick.localize.octopi``) binds to it. ``require_particle_radius`` refuses, before inference, a model whose object
+the localization could not size. GPU job; belongs in the picking TensorFlow image.
 """
 
 from __future__ import annotations
 
-from pipeliner.job_options import FloatJobOption, IntJobOption, JobOptionValidationResult, StringJobOption
+from pipeliner.job_options import (
+    BooleanJobOption,
+    FloatJobOption,
+    IntJobOption,
+    JobOptionValidationResult,
+    StringJobOption,
+)
 from pipeliner.nodes import NODE_PROCESSDATA
 
 from copick_pipeliner.tools.segmentation_reuse import validate_session
 
 from ._common import SEGMENTATION_MANIFEST, CopickJobBase
 
-#: The node keywords of the segmentation manifest; a trace job's input declares the first three.
+#: The node keywords of the segmentation manifest; a trace or localization job's input declares the first three.
 SEGMENTATION_KWDS = ["copick", "manifest", "segmentation"]
 
 
@@ -66,10 +73,18 @@ class CopickSegmentEasymodeJob(CopickJobBase):
         self.joboptions["reuse_segmentation_session"] = StringJobOption(
             label="Reuse completed segmentation session:",
             default_value="",
-            help_text="Empty runs inference. A prior job's session (e.g. job006, a copick.easymode or "
-                      "copick.segment.easymode job) is recorded instead, after its completed inference and every "
-                      "array's metadata are verified; no inference fallback.",
+            help_text="Empty runs inference. A prior job's session (e.g. job006, a copick.segment.easymode job) is "
+                      "recorded instead, after its completed inference and every array's metadata are verified; no "
+                      "inference fallback.",
             is_required=False,
+        )
+        self.joboptions["require_particle_radius"] = BooleanJobOption(
+            label="Require a particle radius for every model?",
+            default_value=False,
+            help_text="Yes when the segmentation will be localized into picks (copick.localize.octopi), so every "
+                      "model's pickable object must be a particle with a radius in the copick config (name:radius): "
+                      "a model whose object is not is refused before inference, rather than after it by the "
+                      "localization.",
         )
         self.add_gpu_options()
         self.add_xla_option()
@@ -91,6 +106,7 @@ class CopickSegmentEasymodeJob(CopickJobBase):
         args += ["--batch-size", jo["batch_size"].get_string()]
         args += self.gpu_args()
         args += self.xla_args()
+        args += ["--require-particle-radius" if jo["require_particle_radius"].get_boolean() else "--no-require-particle-radius"]
         source = validate_session(jo["reuse_segmentation_session"].get_string())
         if source:
             args += ["--reuse-segmentation-session", source]

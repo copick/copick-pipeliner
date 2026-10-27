@@ -10,8 +10,7 @@ Sources: copick ``cli/util.py`` (``--run-names/-r`` repeatable, ``--user-id``,
 type@vs``, ``-r/--run`` comma list, ``--gpus``, ``--tta``, ``--batch-size``,
 ``--threshold``, ``--add-objects/--no-add-objects``; from 0.4.0 ``--cpu``, ``--max-workers``,
 ``--threads``, ``--model-dir``, ``--report``); copick-utils ``cli/util.py``
-(``--input``, ``--output``, ``--ref-seg``, ``--segmentation-idx``, ``--maxima-filter-size``,
-``--min-particle-size``, ``--max-particle-size``, ``--workers``); copick-torch
+(``--input``, ``--output``, ``--ref-seg``, ``--workers``); copick-torch
 ``run_membrane_seg.py`` (``--tomo-alg``, ``--voxel-size``, ``--threshold``, ``--user-id``,
 ``--session-id``); octopi docs ``user-guide/inference`` (``segment --config --tomo-uri
 --model-weights --seg-uri --run-ids --ntta``).
@@ -103,25 +102,6 @@ def easymode_segment_argv(
 
 
 # ---- copick-utils ---------------------------------------------------------------------
-
-def seg2picks_argv(
-    *, config: str, seg_name: str, seg_user: str, seg_session: str, voxel_a: float, out_name: str,
-    out_user: str, out_session: str, runs: list[str] | None, maxima_filter_size: int,
-    min_particle_size: int, max_particle_size: int, segmentation_idx: int = 1, workers: int | None = None,
-) -> list[str]:
-    check_safe(config, seg_name, seg_user, seg_session, out_name, out_user, out_session, *(runs or []))
-    argv = [settings.copick_exe(), "convert", "seg2picks", "-c", config,
-            "--input", seg_uri(seg_name, seg_user, seg_session, voxel_a),
-            "--output", seg_uri(out_name, out_user, out_session),
-            "--segmentation-idx", str(int(segmentation_idx)),
-            "--maxima-filter-size", str(int(maxima_filter_size)),
-            "--min-particle-size", str(int(min_particle_size)),
-            "--max-particle-size", str(int(max_particle_size))]
-    argv += run_names_args(runs)
-    if workers:
-        argv += ["--workers", str(int(workers))]
-    return argv  # VERIFY-P2: flag spellings from copick-utils cli/util.py
-
 
 def picksin_argv(
     *, config: str, picks_uri: str, ref_seg_uri: str, out_uri: str, runs: list[str] | None, workers: int | None = None,

@@ -1,8 +1,8 @@
 """What each ``copick-pipeliner-tools`` verb does, as functions the CLI and tests call.
 
 The deterministic verbs (``project`` in its portal form for config writing,
-``portal_picks``) need only copick core for storage; the ML verbs (``easymode``,
-``boundary``, ``membrain``) compose external CLIs through ``external.Runner`` and read
+``portal_picks``) need only copick core for storage; the ML verbs (``segment_easymode``,
+``localize``, ``boundary``, ``membrain``) compose external CLIs through ``external.Runner`` and read
 back results through copick. Everything scientific-tool-specific stays in
 ``external.py``; this module is control flow and manifests.
 """
@@ -16,8 +16,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import dedupe, easymode_inference, external, octopi_localization, portal_annotations as portal
+from . import easymode_inference, external, octopi_localization, portal_annotations as portal
 from .segmentation_reuse import (
+    LOCALIZABLE_SEGMENTATION_JOBS,
     resolve_recorded_path,
     segmentation_array_record,
     tomogram_shape,
@@ -851,9 +852,9 @@ def _open_for_storage(config: Path | None):
     return copick.from_file(str(config))
 
 
-# ---- copick.easymode / copick.segment.easymode -----------------------------------------
+# ---- copick.segment.easymode ----------------------------------------------------------
 
-#: The copick user every easymode segmentation (and the picks made from it) is stored under.
+#: The copick user every easymode segmentation is stored under.
 EASYMODE_USER = "easymode"
 
 
@@ -869,8 +870,7 @@ def _easymode_inference(
     copick-easymode runs one worker per allocated GPU itself, and this raises before anything downstream when it
     fails or a segmentation is missing), or -- ``reuse`` -- a completed sibling job's session verified by
     ``validate_reuse`` (its inference manifest plus every array's metadata), never an inference fallback. Returns
-    ``(inference manifest, recovery record or None)``; both easymode job types call this, so the inference path is
-    one code path."""
+    ``(inference manifest, recovery record or None)``."""
     recovery = None
     if reuse:
         recovery = validate_reuse(
@@ -895,18 +895,29 @@ def segment_easymode(
     *, config: Path, out_dir: Path, session_id: str, models: list[str], tomo_type: str, voxel_a: float,
     runs: list[str] | None, tta: int, threshold: float, batch_size: int, gpus: str | None, use_gpu: bool,
     threads: int | None, runner: external.Runner, max_workers: int | None = None,
-    reuse_segmentation_session: str = "", xla: bool = False,
+    reuse_segmentation_session: str = "", xla: bool = False, require_particle_radius: bool = False,
 ) -> dict:
     """easymode segmentation only: one ``copick inference easymode`` (or a verified reuse), then ``segmentations.json``.
 
-    The manifest is the product a tracing job binds to: per run and model the segmentation URI and its array
-    metadata (shape, dtype, sampling, checked against the run's tomogram without reading a voxel), plus the weights
-    the job resolved and the inference settings. It is written only after every requested segmentation verified, so
-    its ``status: complete`` is the completion record a consumer requires (``validate_segmentation_manifest``).
+    The manifest is the product a tracing or localization job binds to: per run and model the segmentation URI and its
+    array metadata (shape, dtype, sampling, checked against the run's tomogram without reading a voxel), plus the
+    weights the job resolved and the inference settings. It is written only after every requested segmentation
+    verified, so its ``status: complete`` is the completion record a consumer requires
+    (``validate_segmentation_manifest``). ``require_particle_radius``: the segmentation will be localized into picks
+    (``copick.localize.octopi``), so a model whose pickable object is not a particle with a radius in the copick config
+    is refused before any inference, with the check the localization itself makes.
     """
     objects = [external.copick_object_name(m) for m in models]
     if not objects:
         raise ValueError("no easymode models given")
+    if require_particle_radius:
+        for model, obj in zip(models, objects):
+            try:
+                octopi_localization.particle_radius(config, obj)
+            except ValueError as exc:
+                raise ValueError(f"require_particle_radius: easymode model {model!r} segments the copick object {obj!r}, "
+                                 f"which cannot be localized into picks ({exc}); declare it as {obj}:<radius A> in "
+                                 "copick.project's objects, or set require_particle_radius to No") from exc
     source_session = validate_session(reuse_segmentation_session) or session_id
     requested_voxel_a = float(voxel_a)
     voxel_a = snap_voxel_size(config, voxel_a)
@@ -940,6 +951,7 @@ def segment_easymode(
         "weights": shards.get("models_fetch") or (recovery or {}).get("weights"),
         "inference_skipped": bool(reuse_segmentation_session),
         "recovery": recovery,
+        "require_particle_radius": bool(require_particle_radius),
         "sharding": {"n_workers": shards["n_workers"], "devices": shards["devices"],
                      "skipped_existing": shards["skipped_existing"], "status": shards.get("status"),
                      "manifest": str(Path(out_dir) / easymode_inference.MANIFEST), "report": shards.get("easymode_report"),
@@ -990,132 +1002,73 @@ def describe_segmentations(config: Path, runs: list[str], objects: list[str], *,
     return out
 
 
-def easymode(
-    *, config: Path, out_dir: Path, session_id: str, models: list[str], tomo_type: str, voxel_a: float,
-    runs: list[str] | None, tta: int, threshold: float, batch_size: int, maxima_filter_size: int,
-    min_particle_size: int, max_particle_size: int, layout: str, gpus: str | None, use_gpu: bool,
-    threads: int | None, runner: external.Runner, max_workers: int | None = None,
-    conversion_workers: int | None = None, reuse_segmentation_session: str = "",
-    merge_close_picks: bool = True, min_separation_a: float = 0.0,
-    conversion_backend: str = "octopi", localization_method: str = "watershed", radius_min_scale: float = 0.5, radius_max_scale: float = 1.0,
-    xla: bool = False,
-) -> dict:
-    """easymode segmentation of every model (one ``copick inference easymode``, which runs one worker per
-    allocated GPU itself; see ``easymode_inference``), seg2picks per model, one STAR of the first model. Any
-    incomplete inference raises before seg2picks/export; a rerun in the same session skips the runs already
-    segmented.
+# ---- copick.localize.octopi -----------------------------------------------------------
 
-    ``reuse_segmentation_session`` (root's 10426 recovery, ``segmentation_reuse``): a completed
-    sibling job's session whose segmentations are converted into THIS job's session instead of
-    running inference -- only after that job's inference manifest and every segmentation's array
-    metadata are verified; never an inference fallback. ``conversion_workers``: seg2picks
-    parallelism; ``None``/``0`` = automatic (bounded by the job's memory and the volume size,
-    see ``bounded_workers``), a positive integer = exactly that many.
+#: The copick user an Octopi localization stores its picks under (the session is always the job number).
+OCTOPI_USER = "octopi"
+
+
+def localize(
+    *, config: Path, out_dir: Path, session_id: str, in_segmentation: Path, object_name: str | None,
+    runs: list[str] | None, localization_method: str, radius_min_scale: float, radius_max_scale: float,
+    maxima_filter_size: int, conversion_workers: int | None, layout: str, threads: int | None,
+    runner: external.Runner,
+) -> dict:
+    """Octopi's radius-aware localization of a verified segmentation -> picks -> ``particles.star``.
+
+    The segmentation is the one the bound ``segmentations.json`` names (``validate_segmentation_manifest`` over
+    ``LOCALIZABLE_SEGMENTATION_JOBS``): its URI, user, session, sampling and tomogram type are read from that
+    manifest, never assumed. The installed Octopi's own ``extract_coordinates`` runs unchanged under octopi's
+    interpreter (``octopi_localize_worker``), with radii from the object's particle radius in the copick config
+    (``octopi_localization.radius_settings``), and its per-run report is validated before the export. The picks are
+    stored under ``<object>:octopi/<this job>`` and exported with identity orientations (an initialization).
+    ``conversion_workers``: ``None``/``0`` = automatic (bounded by the job's memory and the volume size, see
+    ``bounded_workers``), a positive integer = exactly that many.
     """
-    user = EASYMODE_USER
-    # copick-side names: what the segmentations and picks are stored and looked up under. The
-    # easymode names (``models``) are what copick-easymode is asked to run.
-    objects = [external.copick_object_name(m) for m in models]
     if isinstance(conversion_workers, bool) or (conversion_workers is not None and (not isinstance(conversion_workers, int) or conversion_workers < 0)):
         raise ValueError("conversion_workers must be a positive integer, or 0/None for automatic")
     explicit_workers = conversion_workers or None
-    if conversion_backend not in octopi_localization.BACKENDS:
-        raise ValueError("Unknown conversion_backend")
-    source_session = validate_session(reuse_segmentation_session) or session_id
-    requested_voxel_a = float(voxel_a)
-    voxel_a = snap_voxel_size(config, voxel_a)
-    selected = runs or sorted(read_project_manifest(config).get("runs", {}))
-    if not selected:
-        raise ValueError(f"no runs to segment: none given and the project manifest beside {config} lists none")
-    localization = {"backend": conversion_backend}
-    if conversion_backend == "octopi":
-        localization.update(method=localization_method, executable=settings.octopi_exe(),
-            objects=octopi_localization.radius_settings(config, objects, voxel_a, localization_method, radius_min_scale, radius_max_scale, maxima_filter_size),
-            reports={}, inactive_legacy_options=["min_particle_size", "max_particle_size"])
-    else:
-        localization.update(maxima_filter_size=maxima_filter_size, min_particle_size=min_particle_size, max_particle_size=max_particle_size)
-
-
-    shards, recovery = _easymode_inference(
-        config=config, out_dir=out_dir, session_id=session_id, source_session=source_session, models=models,
-        objects=objects, tomo_type=tomo_type, voxel_a=voxel_a, runs=selected, tta=tta, threshold=threshold,
-        batch_size=batch_size, gpus=gpus, use_gpu=use_gpu, threads=threads, runner=runner, max_workers=max_workers,
-        reuse=bool(reuse_segmentation_session), xla=xla)
-    # seg2picks loads one whole segmentation per worker: bound the parallelism by the job's
-    # memory and the volume size, not by the CPU count (10426 at 8.66 A: 64 workers -> OOM),
-    # unless the job states an explicit count.
+    seg = validate_segmentation_manifest(Path(in_segmentation), config=config, runs=runs, object_name=object_name or None,
+                                         verify_arrays=not runner.dry_run, allowed_jobs=LOCALIZABLE_SEGMENTATION_JOBS)
+    obj, voxel_a, tomo_type, selected = seg["object"], seg["voxel_size_a"], seg["tomo_type"], seg["runs"]
+    if not obj or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in obj):
+        raise ValueError("Octopi object name must be a safe model token")
+    localization = {"backend": "octopi", "method": localization_method, "executable": settings.octopi_exe(),
+                    "objects": octopi_localization.radius_settings(config, [obj], voxel_a, localization_method,
+                                                                   radius_min_scale, radius_max_scale, maxima_filter_size),
+                    "reports": {}}
+    # The localization loads one whole segmentation per worker: bound the parallelism by the job's memory and the
+    # volume size, not by the CPU count (10426 at 8.66 A: 64 workers -> OOM), unless the job states an explicit count.
     if explicit_workers:
-        seg2picks_workers, seg2picks_accounting = explicit_workers, {"workers": explicit_workers, "source": "conversion_workers joboption"}
+        workers, accounting = explicit_workers, {"workers": explicit_workers, "source": "conversion_workers joboption"}
     else:
-        seg2picks_workers, seg2picks_accounting = bounded_workers(threads, tomogram_voxels(config, tomo_type, voxel_a), job_memory_limit_bytes())
-        seg2picks_accounting["source"] = "automatic (memory and volume bound)"
-    if recovery is not None:
-        recovery["conversion_workers"] = seg2picks_workers
-    print(f"seg2picks: {seg2picks_workers} worker(s) ({seg2picks_accounting})", flush=True)
-    for model in objects:
-        if conversion_backend == "legacy_seg2picks":
-            runner.run(external.seg2picks_argv(
-                config=str(config), seg_name=model, seg_user=user, seg_session=source_session, voxel_a=voxel_a,
-                out_name=model, out_user=user, out_session=session_id, runs=runs,
-                maxima_filter_size=maxima_filter_size, min_particle_size=min_particle_size,
-                max_particle_size=max_particle_size, workers=seg2picks_workers))
-        else:
-            if not model or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in model):
-                raise ValueError("Octopi object name must be a safe model token")
-            report_path = Path(out_dir) / f"octopi-localization-{model}.json"
-            runner.run(octopi_localization.adapter_argv(
-                config=config, report=report_path, runs=selected, model=model,
-                source_session=source_session, output_session=session_id, voxel_a=voxel_a,
-                method=localization_method, min_scale=radius_min_scale, max_scale=radius_max_scale,
-                filter_size=maxima_filter_size, workers=max(1, int(seg2picks_workers or 1))))
-            if not runner.dry_run:
-                localization["reports"][model] = octopi_localization.validate_report(
-                    report_path, config=config, runs=selected, model=model,
-                    source_session=source_session, output_session=session_id)
-    primary = objects[0]
-    # One centre per particle: seg2picks yields a centroid per watershed fragment, so a
-    # fragmented prediction of one ribosome gives several picks inside it (see tools/dedupe).
-    # The Octopi backend merges close centroids itself (upstream remove_repeated_picks at 0.5 x radius); the
-    # 0.7 x diameter merge below belongs to the legacy seg2picks path only and never runs on Octopi output.
-    legacy = conversion_backend == "legacy_seg2picks"
-    merge_report: dict = {"enabled": bool(merge_close_picks and legacy)}
-    if not legacy:
-        merge_report["note"] = "octopi backend: upstream centroid merge at radius_min_scale x object radius; --merge-close-picks not applied"
-    picks_user = user
-    if merge_close_picks and legacy and not runner.dry_run:
-        import copick
-
-        root = copick.from_file(str(config))
-        if min_separation_a and min_separation_a > 0:
-            separation, why = float(min_separation_a), "min_separation_a joboption"
-        else:
-            separation, why = dedupe.default_min_separation(root, primary)
-        merge_report.update(dedupe.merge_project_picks(config, selected, object_name=primary, user_id=user, session_id=session_id, min_separation_a=separation))
-        merge_report["min_separation_source"] = why
-        picks_user = merge_report["merged_user_id"]
-        t = merge_report["totals"]
-        print(f"merge_close_picks: {t['n_raw']} raw -> {t['n_merged']} picks ({t['n_removed']} fragment centres merged) at {separation:g} A ({why})", flush=True)
-    elif merge_close_picks and legacy:
-        merge_report["note"] = "dry run: merge planned after seg2picks"
+        workers, accounting = bounded_workers(threads, tomogram_voxels(config, tomo_type, voxel_a), job_memory_limit_bytes())
+        accounting["source"] = "automatic (memory and volume bound)"
+    print(f"localization: {workers} worker(s) ({accounting})", flush=True)
+    report_path = Path(out_dir) / f"octopi-localization-{obj}.json"
+    argv = octopi_localization.adapter_argv(
+        config=config, report=report_path, runs=selected, model=obj, source_user=seg["user_id"],
+        source_session=seg["session_id"], output_user=OCTOPI_USER, output_session=session_id, voxel_a=voxel_a,
+        method=localization_method, min_scale=radius_min_scale, max_scale=radius_max_scale,
+        filter_size=maxima_filter_size, workers=max(1, int(workers or 1)))
+    runner.run(argv)
+    picks_uri = external.seg_uri(obj, OCTOPI_USER, session_id)
     if runner.dry_run:
-        return {"dry_run": True, "picks_uri": external.seg_uri(primary, picks_user, session_id), "shards": shards,
-                "merge_close_picks": merge_report, "localization": localization}
+        return {"dry_run": True, "picks_uri": picks_uri, "segmentation_uri": seg["segmentation_uri"], "argv": argv,
+                "localization": localization}
+    localization["reports"][obj] = octopi_localization.validate_report(
+        report_path, config=config, runs=selected, model=obj, source_user=seg["user_id"],
+        source_session=seg["session_id"], output_user=OCTOPI_USER, output_session=session_id)
     return export_copick_picks(
-        config=config, out_dir=out_dir, picks_uri=external.seg_uri(primary, picks_user, session_id), tomo_type=tomo_type,
-        voxel_a=voxel_a, layout=layout, runs=runs, session_id=session_id, job_type="copick.easymode",
+        config=config, out_dir=out_dir, picks_uri=picks_uri, tomo_type=tomo_type, voxel_a=voxel_a, layout=layout,
+        runs=selected, session_id=session_id, job_type="copick.localize.octopi",
         tilt_series_pixel_size_a=_project_tilt_pixel_sizes(config),
-        source={"kind": "copick-segmentation", "tool": "copick-easymode", "models": models, "objects": objects,
-                "models_fetch": shards.get("models_fetch"),
-                "segmentations": [external.seg_uri(m, user, source_session, voxel_a) for m in objects],
-                "source_session": source_session, "inference_skipped": bool(reuse_segmentation_session),
-                "conversion_workers": seg2picks_workers, "recovery": recovery,
-                "raw_picks_uri": external.seg_uri(primary, user, session_id), "merge_close_picks": merge_report,
-                "sharding": {"n_workers": shards["n_workers"], "devices": shards["devices"], "skipped_existing": shards["skipped_existing"],
-                             "manifest": str(Path(out_dir) / easymode_inference.MANIFEST), "report": shards.get("easymode_report"),
-                     "xla": bool(shards.get("xla")), "xla_fallbacks": shards.get("xla_fallbacks")},
-                "voxel_size_requested_a": requested_voxel_a, "voxel_size_used_a": voxel_a,
-                "seg2picks_parallelism": seg2picks_accounting,
-                "localization": localization},
+        source={"kind": "copick-segmentation", "tool": "octopi", "segmentation_manifest": str(in_segmentation),
+                "segmentation_manifest_sha256": seg["manifest_sha256"], "segmentation_job_type": seg["job_type"],
+                "segmentation_uri": seg["segmentation_uri"], "segmentation_user": seg["user_id"],
+                "segmentation_session": seg["session_id"], "object": obj, "tomo_type": tomo_type,
+                "voxel_size_a": voxel_a, "validation": seg["validation"], "conversion_workers": workers,
+                "localization_parallelism": accounting, "argv": argv, "localization": localization},
     )
 
 

@@ -10,10 +10,10 @@ like any RELION job.
 |---|---|---|
 | `copick.project` | copick project (config + tomograms) from a RELION `tomograms.star` **or** a cryoET Data Portal dataset mirror | CPU |
 | `copick.portalpicks` | deposited portal annotations of one object → copick picks → `particles.star` (ground-truth fallback / reference) | CPU |
-| `copick.easymode` | copick-easymode segmentation → Octopi radius-aware localization → `particles.star` | GPU (TensorFlow) |
 | `copick.boundary` | octopi `tomogram-boundary` (specimen vs vacuum) → keep picks inside the specimen → `particles.star` | GPU (torch) |
 | `copick.membrain` | MemBrain-seg membranes via copick-torch → `segmentations.json` | GPU (torch) |
-| `copick.segment.easymode` | copick-easymode segmentation only (the same inference step as `copick.easymode`) → `segmentations.json` | GPU (TensorFlow) |
+| `copick.segment.easymode` | copick-easymode segmentation → `segmentations.json` | GPU (TensorFlow) |
+| `copick.localize.octopi` | Octopi radius-aware localization of that segmentation → picks → `particles.star` | CPU |
 | `copick.filaments.trace` | copick-utils `seg2fil` on that segmentation → Filaments + instance segmentation → `filaments.json` | CPU |
 | `copick.filaments.picks` | copick-utils `fil2picks` at a stated spacing → `particles.star` with RELION's filament columns | CPU |
 | `copick.filaments.polarity` | copick-helix `helix-polarity` on traced microtubules → polarity calls, `reference.mrc` and lattice-registered picks → `particles.star` | CPU |
@@ -41,12 +41,14 @@ like any RELION job.
   relative to the *tomogram actually picked* (`pos_A − dims_px·voxel/2`, the py2rely and
   zarr-particle-tools convention), Euler angles are `Rotation.from_matrix(m).inv().as_euler("ZYZ")`,
   and filament picks carry the filament frame, tube IDs, track lengths and per-filament polarity.
-  Two layouts, both with `rlnCenteredCoordinate*Angst` only (uncentered pixels are never written):
-  `import_centered`, the bundle `relion.importtomo.coordinates` reads (an index `particles.star`,
-  `data_coordinate_files`, naming one `coordinates/<run>.star` per run, all with the same columns), and
+  Three layouts, all with `rlnCenteredCoordinate*Angst` only (uncentered pixels are never written):
+  `import_centered` (the default), the bundle `relion.importtomo.coordinates` reads (an index `particles.star`,
+  `data_coordinate_files`, naming one `coordinates/<run>.star` per run, all with the same columns);
   `relion5`, one flat `data_particles` (+ `data_optics`, one group per run, when every run's tilt-series
-  pixel size is known) for a direct `relion.pseudosubtomo` binding. `tests/test_coords.py` pins
-  copick's output to those conventions.
+  pixel size is known) for a direct `relion.pseudosubtomo` binding; and `merged`, one flat `data_particles`
+  with no optics block and no `rlnOpticsGroup`, the table `relion_tomo_import_coordinates` writes (the
+  `import_centered` per-run tables joined; copick's `particles` layout with `include_optics=False`).
+  `tests/test_coords.py` pins copick's output to those conventions.
 * **Attempt identity**: the copick `session_id` of everything a job writes is its pipeliner job
   number (`job012`), so a rerun never overwrites an earlier attempt; downstream jobs read the
   exact URI from the upstream `picks_manifest.json`, never a default.
@@ -70,8 +72,8 @@ binding the previous job's registered output node (`ProcessData` `copick.manifes
 * The segmentation job records, per run and model, the segmentation URI and its array metadata checked
   against the tomogram (no voxel read), the weights resolved and the inference settings, and says
   `complete` only after every array verified. `reuse_segmentation_session` records a prior job's
-  verified session (a `copick.easymode` or `copick.segment.easymode` job, found by job number in any job
-  directory) instead of running inference.
+  verified session (a `copick.segment.easymode` job, found by job number in any job directory) instead of
+  running inference.
 * The trace refuses a segmentation manifest that is not complete, of another project, or missing a run,
   and an object the project does not declare a filament. Options mirror `seg2fil`; an empty one keeps
   copick-utils' own default. The Filaments and the instance segmentation (same IDs) are stored under
@@ -132,10 +134,17 @@ deposition, shape, method type and ground-truth status, or pinned by `annotation
 candidates for a run fail with the candidates listed. The picks manifest pins the chosen file IDs and records
 whether the orientations were measured.
 
-## Localization and reuse (0.1.12)
+## Localization (`copick.localize.octopi`)
 
-`copick.easymode` defaults to `conversion_backend=octopi`, using the installed
-Octopi `extract_coordinates` implementation (validated with Octopi 1.7.0).
+Particles are picked in two jobs: `copick.segment.easymode` segments, and `copick.localize.octopi` binds its
+`segmentations.json` (`ProcessData`, `copick.manifest.segmentation`) and turns the segmentation into picks. The
+localization reads the segmentation's URI, user, session, voxel size and tomogram type from that manifest, after the
+same checks a filament trace makes (a complete `copick.segment.easymode` manifest of this copick project, covering
+every run, each array still matching its tomogram); the manifest of any other job type, e.g. `copick.membrain`, is
+refused. `object` names the segmented object to localize; empty takes the manifest's primary object (its
+`segmentation_name`).
+
+The job runs the installed Octopi `extract_coordinates` implementation unchanged (validated with Octopi 1.7.0).
 `localization_method=watershed` separates touching regions; `com` uses connected-component
 centers of mass. Both use the particle radius from the Copick configuration, spherical
 volume filtering, nearby-centroid merging, and Octopi's border rejection. For a ribosome
@@ -144,13 +153,18 @@ radius range and a 75 Å centroid-merge distance. `maxima_filter_size=10` is use
 watershed only. Coordinates from Octopi are converted from ZYX voxels to XYZ Å once.
 Each conversion records the actual Octopi version, algorithm source hash, parameters,
 and per-run success or explicit empty output in `octopi-localization-<object>.json`.
+`conversion_workers=0` bounds the concurrent whole-volume conversions by the job's memory and the volume size; an
+explicit positive number is used as given. It is a CPU job.
 
-Set `conversion_backend=legacy_seg2picks` for the older integer-volume converter.
-Its `min_particle_size`, `max_particle_size`, `merge_close_picks`, and
-`min_separation_a` settings apply only to that backend. The optional legacy merge
-uses 0.7 × object diameter by default (210 Å for a 150 Å ribosome radius); it is
-**never applied after Octopi localization**. To reproduce pre-merge jobs, also set
-`merge_close_picks=No` and `maxima_filter_size=9`.
+The picks are stored under `<object>:octopi/<job>` and exported, with identity orientations, to `particles.star`
+and `picks_manifest.json` (`copick.picks.localize`, `copick.manifest.picks.localize`). The manifest's `source` names
+the segmentation manifest, the segmentation's URI and session, and the localization's radius settings and report.
+Localizing existing segmentations again needs no inference: run a new `copick.localize.octopi` job on the same
+`segmentations.json`.
+
+A segmentation meant for localization can say so: `require_particle_radius=Yes` on `copick.segment.easymode` refuses,
+before inference, any model whose pickable object is not a particle with a radius in the copick configuration, with
+the check the localization itself makes.
 
 Install `copick-pipeliner[copick]` in the Octopi environment as well as the controller
 and Easymode/tool environments. `PIPELINER_OCTOPI_EXECUTABLE` selects the Octopi
@@ -161,11 +175,11 @@ package alone does not install the ML tools or their weights.
 
 ## easymode inference and weights
 
-A `copick.easymode` job runs one `copick inference easymode` and requires **copick-easymode >= 0.4.0**, which runs
-one worker process per GPU of the job's allocation itself (`gpu_ids` narrows the set, `use_gpu=No` runs one CPU
+A `copick.segment.easymode` job runs one `copick inference easymode` and requires **copick-easymode >= 0.4.0**, which
+runs one worker process per GPU of the job's allocation itself (`gpu_ids` narrows the set, `use_gpu=No` runs one CPU
 worker), splits the runs between them, and exits non-zero when any run fails. Runs that this job's session has
-already segmented are skipped, and the job stops before localization or export unless every requested segmentation
-exists with its tomogram's shape. `easymode_shards.json` in the job directory records the invocation and, from
+already segmented are skipped, and the job fails, without a complete `segmentations.json`, unless every requested
+segmentation exists with its tomogram's shape. `easymode_shards.json` in the job directory records the invocation and, from
 copick-easymode's own report (`easymode_report.json`), the devices, the per-GPU workers and the models used.
 
 `use_xla=Yes` passes `--xla` (copick-easymode >= 0.5.0), which runs each model's forward pass as one
@@ -176,7 +190,7 @@ XLA-compiled function.
 - A compiled call that raises falls back to the plain model for that worker. The fallback is recorded in the
   manifest (`xla_fallbacks`), and the run still counts as processed.
 - It is off by default, as in copick-easymode.
-- Both easymode job types take the option, and their manifests record whether it was used.
+- The segmentation job takes the option, and its manifest records whether it was used.
 
 easymode keeps its weights in one directory, `MODEL_DIRECTORY` in `~/easymode/settings.txt` (default
 `~/easymode`). Set `COPICK_PIPELINER_EASYMODE_MODELS` to a directory every job can read, and the job passes it as
@@ -191,15 +205,12 @@ shared between users group-writable (`chmod g+ws`); copick-easymode downloads in
 
 Every easymode feature can be run, including the 2D-engine (`.scnm`) models. A feature name with underscores is
 stored in copick with dashes (`atp_synthase` is the object `atp-synthase`), which is the object the copick
-configuration must define, as a particle with a radius, for the Octopi backend.
+configuration must define, as a particle with a radius, for `copick.localize.octopi`.
 
-For a new conversion of existing segmentations, set
-`reuse_segmentation_session=<prior job session>` on a fresh `copick.easymode` job.
-The old sibling job's completed inference manifest, requested runs/models/settings,
+To record existing segmentations again, set `reuse_segmentation_session=<prior job session>` on a fresh
+`copick.segment.easymode` job. The old job's completed inference manifest, requested runs/models/settings,
 and stored array metadata must match. Inference is skipped; missing or inconsistent
-sources fail without fallback. `conversion_workers=0` retains the automatic memory
-estimate; an explicit positive number caps concurrent whole-volume conversions
-independently of inference threads. The production conversion trials used 2 workers.
+sources fail without fallback.
 
 `copick.boundary` similarly accepts `reuse_boundary_session=<prior job session>`.
 It verifies a successful sibling boundary job and matching binary sample masks, then

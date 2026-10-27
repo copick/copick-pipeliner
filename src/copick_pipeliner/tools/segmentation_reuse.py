@@ -184,6 +184,8 @@ def validate_boundary_reuse(*,config,out_dir,source_session,output_session,runs,
 
 #: Job types whose ``segmentations.json`` a filament trace may read (binary segmentations of pickable objects).
 TRACEABLE_SEGMENTATION_JOBS = ("copick.segment.easymode",)
+#: Job types whose ``segmentations.json`` an Octopi localization may read (binary segmentations of particle objects).
+LOCALIZABLE_SEGMENTATION_JOBS = ("copick.segment.easymode",)
 
 
 def resolve_recorded_path(recorded: str, manifest_path: Path) -> Path:
@@ -194,25 +196,27 @@ def resolve_recorded_path(recorded: str, manifest_path: Path) -> Path:
 
 
 def validate_segmentation_manifest(path: Path, *, config: Path, runs: list[str] | None = None,
-                                   object_name: str | None = None, verify_arrays: bool = True) -> dict:
-    """The segmentation a filament trace reads, taken from its producing job's ``segmentations.json``.
+                                   object_name: str | None = None, verify_arrays: bool = True,
+                                   allowed_jobs: tuple[str, ...] = TRACEABLE_SEGMENTATION_JOBS) -> dict:
+    """The segmentation a filament trace (or an Octopi localization) reads, from its producing job's ``segmentations.json``.
 
     The checks the reuse path makes on a sibling's inference manifest, made on the bound manifest instead: it is a
-    copick-pipeliner segmentation manifest of a traceable job type, it says ``complete`` (written only after every
-    worker returned and every array verified), it was made in this copick project, it covers every requested run
-    for the object, and -- ``verify_arrays`` -- each run's array still has its tomogram's shape, z/y/x axes, the
-    stated sampling and an integer dtype (headers only, no voxel read). Returns what the trace needs."""
+    copick-pipeliner segmentation manifest of one of ``allowed_jobs`` (``TRACEABLE_SEGMENTATION_JOBS`` for a trace,
+    ``LOCALIZABLE_SEGMENTATION_JOBS`` for a localization), it says ``complete`` (written only after every worker
+    returned and every array verified), it was made in this copick project, it covers every requested run for the
+    object, and -- ``verify_arrays`` -- each run's array still has its tomogram's shape, z/y/x axes, the stated
+    sampling and an integer dtype (headers only, no voxel read). Returns what the consuming job needs."""
     import copick
 
     from .manifest import read_manifest
 
     path = Path(path)
     manifest = read_manifest(path)
-    if manifest.get("kind") != "copick-pipeliner/segmentations" or manifest.get("job_type") not in TRACEABLE_SEGMENTATION_JOBS:
+    if manifest.get("kind") != "copick-pipeliner/segmentations" or manifest.get("job_type") not in allowed_jobs:
         raise ValueError(f"{path} is a {manifest.get('kind')} manifest of {manifest.get('job_type')!r}; "
-                         f"a trace reads the segmentations.json of {', '.join(TRACEABLE_SEGMENTATION_JOBS)}")
+                         f"this job reads the segmentations.json of {', '.join(allowed_jobs)}")
     if manifest.get("status") != "complete":
-        raise ValueError(f"{path} records status {manifest.get('status')!r}; only a complete segmentation is traced")
+        raise ValueError(f"{path} records status {manifest.get('status')!r}; only a complete segmentation is read")
     stated = resolve_recorded_path(str(manifest.get("config") or ""), path)
     if not manifest.get("config") or stated.resolve() != Path(config).resolve():
         raise ValueError(f"{path} was made in the copick project {manifest.get('config')!r}, not {config}")

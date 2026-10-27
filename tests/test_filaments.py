@@ -121,6 +121,10 @@ def chain(tmp_path_factory):
             config=Path(CONFIG), out_dir=Path("AutoPick/job012"), session_id="job012",
             in_filaments=Path("Filaments/job010/filaments.json"), spacing_a=82.0, anchor=None, roll=None, seed=None,
             runs=None, layout="relion5", threads=2, runner=runner)
+        out["picks_merged"] = orchestrate.filament_picks(
+            config=Path(CONFIG), out_dir=Path("AutoPick/job019"), session_id="job019",
+            in_filaments=Path("Filaments/job010/filaments.json"), spacing_a=82.0, anchor=None, roll=None, seed=None,
+            runs=None, layout="merged", threads=2, runner=runner)
         out["boundary"] = orchestrate.boundary(
             config=Path(CONFIG), out_dir=Path("AutoPick/job014"), session_id="job014",
             in_picks=Path("AutoPick/job011/particles.star"), tomo_type="wbp", voxel_a=10.0, boundary_voxel_a=10.0,
@@ -311,6 +315,21 @@ def test_the_flat_layout_has_one_optics_group_per_run_and_the_same_rows(chain):
     assert set(flat.columns) == FILAMENT_COLUMNS | {"rlnOpticsGroup"}
     index = read_particles_star(chain["root"] / "AutoPick/job011/particles.star")
     assert flat.drop(columns=["rlnOpticsGroup"]).round(6).equals(index[flat.columns.drop("rlnOpticsGroup")].round(6))
+
+
+def test_the_merged_layout_is_the_joined_index_without_optics(chain):
+    """merged: the table relion_tomo_import_coordinates writes from the import bundle, as one flat file."""
+    blocks = starfile.read(chain["root"] / "AutoPick/job019/particles.star", always_dict=True)
+    assert list(blocks) == ["particles"]                                       # no data_optics block
+    merged = blocks["particles"]
+    assert set(merged.columns) == FILAMENT_COLUMNS                             # and no rlnOpticsGroup
+    index = read_particles_star(chain["root"] / "AutoPick/job011/particles.star").drop(columns=["rlnOpticsGroup"], errors="ignore")
+    assert list(merged.columns) == list(index.columns)
+    assert merged.round(6).equals(index.round(6))
+    manifest = chain["picks_merged"]
+    assert manifest["layout"] == "merged" and manifest["particles_star_kind"] == "particles" and manifest["coordinate_files"] == {}
+    assert manifest["orientations"] == "filament_frame" and manifest["tilt_series_pixel_size_a"] == 2.5
+    assert manifest["totals"]["n_picks"] == chain["picks"]["totals"]["n_picks"] == len(merged)
 
 
 # -- boundary ---------------------------------------------------------------------------

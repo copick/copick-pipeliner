@@ -279,3 +279,17 @@ What the manifest reads from copick-helix is pinned to a real run (`tests/fixtur
 work directory) and `lattice_gate` (`detected`, `terms`: `"(n, m)" -> [data, decoy]`). `calls.tsv` names a filament
 `<run>_f<instance id>`, with `call` (minus / plus / uncertain) and `seed`. Tests: `tests/test_filament_polarity.py`
 (a fake runner writes those outputs, the picks and the Filaments into a synthetic project; copick's export is real).
+
+## Unreleased: copick.localize.octopi replaces copick.easymode
+
+Segmentation and localization are two jobs. `copick.localize.octopi` (CPU, `AutoPick/`, verb `localize`) binds a
+`copick.segment.easymode` job's `segmentations.json`, reads the segmentation's URI, user, session, voxel size and
+tomogram type from it (`validate_segmentation_manifest` over `LOCALIZABLE_SEGMENTATION_JOBS`), and runs the 0.1.12
+Octopi path unchanged: worker sizing, `octopi_localize_worker.py` under octopi's interpreter, `validate_report`, then
+copick's export. The worker and the report now state the segmentation's user and session and the picks' user and
+session; the picks are `<object>:octopi/<job>`. `copick.segment.easymode` gains `require_particle_radius`, which refuses
+a model whose pickable object has no particle radius before inference. `copick.easymode`, `orchestrate.easymode` and
+the `legacy_seg2picks` backend (`external.seg2picks_argv`, `tools/dedupe.py`, `merge_close_picks`,
+`min_separation_a`, `min/max_particle_size`) are removed. A third STAR layout, `merged`, writes one `data_particles`
+table without optics or `rlnOpticsGroup` (copick's `particles` layout with `include_optics=False`), the table
+`relion_tomo_import_coordinates` writes. Tests: `tests/test_localize.py`.
