@@ -274,6 +274,7 @@ def export_star(out_dir, session_id, threads, runs, dry_run, config, picks_uri, 
         config=Path(config), out_dir=Path(out_dir), picks_uri=picks_uri, tomo_type=orchestrate.project_tomo_type(Path(config), tomo_type), voxel_a=voxel_size, layout=layout,
         runs=_runs(runs), session_id=session_id, job_type="copick.export", filaments_uri=filaments_uri,
         tilt_series_pixel_size_a=orchestrate._project_tilt_pixel_sizes(Path(config)),
+        tomo_names=orchestrate._project_tomo_names(Path(config)),
     )
     click.echo(json.dumps(manifest["totals"]))
 

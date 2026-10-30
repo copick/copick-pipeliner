@@ -3,7 +3,9 @@
 zarr-particle-tools' ``zarrparticletools.importtomo`` resolves, once, which tomogram each run is processed from (and so
 its alignment, voxel spacing and tilt geometry) and writes that as ``portal_selection.json`` (schema version 1). The
 copick project, the picks and every coordinate export read the same record, so the picks live in the frame the tilt
-geometry was imported for. This module reads and checks the file without importing zarr-particle-tools.
+geometry was imported for. Two names per run: copick's portal backend names the run by portal run id, and RELION's
+``rlnTomoName`` is the name the import wrote (:func:`tomo_name`). This module reads and checks the file without
+importing zarr-particle-tools.
 """
 
 from __future__ import annotations
@@ -51,6 +53,16 @@ def read_selection(path: str | Path) -> dict:
 def run_records(selection: dict) -> dict[str, dict]:
     """``copick run name -> run record``. A portal-backed copick project names runs by portal run id."""
     return {str(run["run_id"]): run for run in selection["runs"]}
+
+
+def tomo_name(run: dict) -> str:
+    """The run's ``rlnTomoName`` in the import's tomograms.star, which every STAR export must carry.
+
+    zarr-particle-tools records it per run as ``tomo_name``
+    (``run_<run>_tiltseries_<tilt series>_alignment_<alignment>_spacing_<voxel spacing>``). A selection written before
+    that field came with an import that named each tomogram by portal run id, so that is the fallback.
+    """
+    return str(run.get("tomo_name") or run["run_id"])
 
 
 def dataset_ids(selection: dict) -> list[int]:

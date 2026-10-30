@@ -2,9 +2,10 @@
 
 import json
 
+import numpy as np
 import pytest
 
-from copick_pipeliner.tools import orchestrate, portal_api, portal_selection
+from copick_pipeliner.tools import export_star, orchestrate, portal_api, portal_selection
 from copick_pipeliner.tools.external import Runner
 
 RUN = {
@@ -25,11 +26,25 @@ RUN = {
 }
 
 
+#: zarr-particle-tools' name for RUN's tomogram (``get_tomo_name``), recorded per run as ``tomo_name``.
+TOMO_NAME = "run_16848_tiltseries_16582_alignment_17772_spacing_17051"
+#: A selection with the field, and one written before it (whose import named the tomogram by run id).
+TOMO_NAMES = pytest.mark.parametrize("recorded, expected", [({"tomo_name": TOMO_NAME}, TOMO_NAME), ({}, "16848")])
+
+
 def _selection(tmp_path, **changes):
     data = {"schema_version": 1, "criteria": {}, "runs": [{**RUN, **changes}], "problems": []}
     path = tmp_path / "portal_selection.json"
     path.write_text(json.dumps(data))
     return path
+
+
+def _portal_project(tmp_path, selection):
+    return orchestrate.project(
+        out_dir=tmp_path / "Copick" / "job002", session_id="job002", tomo_type="wbp", voxel_a=None, runs=None,
+        objects="ribosome:150", dataset_dir=None, tomograms_star=None, base_dir=None, tomogram_id=None,
+        overlay_root=None, runner=Runner(dry_run=True), selection=selection,
+    )
 
 
 def test_a_selection_must_be_settled_and_complete(tmp_path):
@@ -43,17 +58,45 @@ def test_a_selection_must_be_settled_and_complete(tmp_path):
 
 
 def test_a_portal_project_records_the_selection_and_imports_nothing(tmp_path):
-    manifest = orchestrate.project(
-        out_dir=tmp_path / "Copick" / "job002", session_id="job002", tomo_type="wbp", voxel_a=None, runs=None,
-        objects="ribosome:150", dataset_dir=None, tomograms_star=None, base_dir=None, tomogram_id=None,
-        overlay_root=None, runner=Runner(dry_run=True), selection=_selection(tmp_path),
-    )
+    manifest = _portal_project(tmp_path, _selection(tmp_path))
     config = json.loads((tmp_path / "Copick" / "job002" / "copick_config.json").read_text())
     assert config["config_type"] == "cryoet_data_portal" and config["dataset_ids"] == [10426]
     run = manifest["runs"]["16848"]
     assert run["tomogram"]["tomogram_id"] == 21114 and run["imported_how"] == "referenced (portal)"
     assert run["tomogram"]["dims_px_xyz"] == [1022, 1440, 400]
     assert manifest["source"]["kind"] == "portal-selection"
+
+
+@TOMO_NAMES
+def test_the_project_keeps_copick_run_names_and_records_the_imports_tomo_name(tmp_path, recorded, expected):
+    selection = _selection(tmp_path, **recorded)
+    (record,) = portal_selection.read_selection(selection)["runs"]
+    assert portal_selection.tomo_name(record) == expected
+    manifest = _portal_project(tmp_path, selection)
+    assert list(manifest["runs"]) == ["16848"] and manifest["runs"]["16848"]["tomo_name"] == expected
+    assert orchestrate._project_tomo_names(tmp_path / "Copick" / "job002" / "copick_config.json") == {"16848": expected}
+
+
+@TOMO_NAMES
+def test_selection_picks_carry_the_imports_tomo_name_keyed_by_copick_run(tmp_path, monkeypatch, recorded, expected):
+    pytest.importorskip("copick")
+    _portal_project(tmp_path, _selection(tmp_path, **recorded))
+    monkeypatch.setattr(portal_api, "candidates", lambda records: {name: [AVAILABLE[2]] for name in records})
+    points = np.array([[511.0, 720.0, 200.0], [100.0, 100.0, 100.0]])   # voxels; the first is the tomogram's center
+    monkeypatch.setattr(portal_api, "read_points", lambda uri: (points, None))
+    out = tmp_path / "AutoPick" / "job005"
+    manifest = orchestrate.portal_picks(
+        config=tmp_path / "Copick" / "job002" / "copick_config.json", out_dir=out, session_id="job005",
+        object_name="cytosolic ribosome", deposition_id="10358", shape="orientedpoint", layout="import_centered",
+        runs=None, user_id="data-portal", import_into_copick=False,
+    )
+    index = export_star.read_index_star(out / export_star.PARTICLES_STAR)
+    assert list(index["rlnTomoName"].astype(str)) == [expected]
+    table = export_star.read_particles_star(out / export_star.PARTICLES_STAR)
+    assert list(table["rlnTomoName"].astype(str)) == [expected, expected]
+    assert table.loc[0, "rlnCenteredCoordinateXAngst"] == 0.0
+    assert list(manifest["runs"]) == ["16848"] and manifest["runs"]["16848"]["tomo_name"] == expected
+    assert manifest["coordinate_files"] == {"16848": f"{out}/coordinates/{expected}.star"}
 
 
 def _file(file_id, *, deposition, method="automated", ground_truth=False, shape="OrientedPoint", name="cytosolic ribosome"):
