@@ -122,11 +122,18 @@ otherwise.
 `copick.project` takes a third source, `in_selection`: the `portal_selection.json` written by zarr-particle-tools'
 `zarrparticletools.importtomo`, which fixes for each portal run the tomogram (and so its alignment and voxel
 spacing) the tilt geometry was imported for. The job writes a copick `cryoet_data_portal` config for the selection's
-datasets with a writable overlay in its own directory; runs are named by portal run ID (the `rlnTomoName` of the
-import) and every tomogram streams from the portal, so nothing is imported, linked or copied. The project manifest
-records, per run, the selected portal tomogram and the copick type it is read under (for 10426:
-`wbp-filtered-ctfdeconv`); a type that names several tomograms of a run, or differs between runs, is refused.
-Downstream jobs read that type when their `tomo_type` is empty.
+datasets with a writable overlay in its own directory; runs are named by portal run ID and every tomogram streams
+from the portal, so nothing is imported, linked or copied. The project manifest records, per run, the selected portal
+tomogram and the copick type it is read under (for 10426: `wbp-filtered-ctfdeconv`); a type that names several
+tomograms of a run, or differs between runs, is refused. Downstream jobs read that type when their `tomo_type` is
+empty.
+
+A run's RELION `rlnTomoName` is not its copick name: it is the name the import gave the run's tomogram, which the
+selection records per run as `tomo_name` (`run_<R>_tiltseries_<T>_alignment_<A>_spacing_<V>`; a selection without
+the field came with an import that used the run ID). The project manifest records it per run, and every STAR export
+on the project (portal picks, Octopi localization, filament picks and polarity, boundary cleanup, `export-star`)
+writes it as `rlnTomoName`, so the picks join the import's tomograms.star. Picks manifests stay keyed by copick run
+and record each run's `tomo_name`.
 
 `copick.portalpicks` on such a project reads the deposited annotations from the portal API: the candidates for a run
 are the annotation files on its selected alignment and voxel spacing, narrowed by object (name or GO ID),
