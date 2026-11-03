@@ -28,6 +28,10 @@ fallback):
     One flat file with one ``data_particles`` table, no ``data_optics`` and no ``rlnOpticsGroup``: the table
     ``relion_tomo_import_coordinates`` writes, i.e. the ``import_centered`` bundle's per-run tables joined. copick's
     ``particles`` layout with ``include_optics=False``.
+
+Each row's ``rlnTomoName`` is its copick run name, except on a portal-selection project: copick names those runs by
+portal run id, and the import named their tomograms otherwise (``portal_selection.tomo_name``). The writers take that
+mapping (``tomo_names``); the manifest stays keyed by copick run and records each run's ``tomo_name``.
 """
 
 from __future__ import annotations
@@ -84,14 +88,52 @@ def particles_path(out_dir) -> str:
     return os.path.join(str(out_dir), PARTICLES_STAR)
 
 
+def _tomo_names_for(runs, tomo_names: dict[str, str] | None) -> dict[str, str] | None:
+    """``copick run -> rlnTomoName`` for the runs a STAR carries rows of; None when every run keeps its own name.
+
+    A run the mapping does not name, or two runs given one name, is refused: its rows would join no tomogram of the
+    import, or another run's."""
+    if not tomo_names:
+        return None
+    runs = list(runs)
+    missing = sorted(run for run in runs if run not in tomo_names)
+    if missing:
+        raise LookupError(f"no rlnTomoName recorded for runs {missing} (the project names {sorted(tomo_names)})")
+    names = {run: str(tomo_names[run]) for run in runs}
+    if len(set(names.values())) < len(names):
+        raise ValueError(f"several runs would carry one rlnTomoName: {names}")
+    return names
+
+
+def _rename_tomograms(particles: pd.DataFrame, names: dict[str, str] | None) -> pd.DataFrame:
+    """The particle table with each run's ``rlnTomoName`` replaced by its name in ``names``."""
+    if not names or not len(particles):
+        return particles
+    runs = particles["rlnTomoName"].astype(str)
+    unnamed = sorted(set(runs) - set(names))
+    if unnamed:
+        raise LookupError(f"no rlnTomoName recorded for runs {unnamed} (the project names {sorted(names)})")
+    return particles.assign(rlnTomoName=runs.map(names))
+
+
+def _files_by_run(files: dict[str, str], names: dict[str, str] | None) -> dict[str, str]:
+    """copick's ``{rlnTomoName: coordinate file}`` keyed by copick run again, as the manifest's runs are."""
+    if not names:
+        return files
+    run_of = {name: run for run, name in names.items()}
+    return {run_of[name]: path for name, path in files.items()}
+
+
 def write_array_tables(
     out_dir: Path, arrays_by_run: dict[str, tuple[np.ndarray, np.ndarray | None]], geometry_by_run: dict[str, VolumeGeometry],
-    *, layout: str, tilt_series_pixel_sizes: dict[str, float | None],
+    *, layout: str, tilt_series_pixel_sizes: dict[str, float | None], tomo_names: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Picks held as arrays (corner-origin Angstrom positions, optional rotation matrices) -> copick's RELION writers.
 
     Each run's tomogram center is its geometry's (``VolumeGeometry.center_a``: origin + dims x voxel / 2), passed
-    to copick explicitly. Returns ``(particles.star path, {run: coordinate file})``; runs without picks get no rows.
+    to copick explicitly. ``tomo_names`` (``run -> rlnTomoName``) renames the rows, and with them the coordinate files
+    (``coordinates/<rlnTomoName>.star``); the ``relion5`` optics groups keep the run names. Returns
+    ``(particles.star path, {run: coordinate file})``; runs without picks get no rows.
     """
     from copick.util.formats import build_relion_star_tables, write_relion_import_bundle, write_star_particles
 
@@ -105,6 +147,7 @@ def write_array_tables(
         if mats is not None:
             transforms[:, :3, :3] = np.asarray(mats, dtype=float).reshape(-1, 3, 3)
         runs[name] = (pos, transforms)
+    names = _tomo_names_for(runs, tomo_names)
     known_tilt = {name: float(v) for name, v in tilt_series_pixel_sizes.items() if name in runs and v is not None}
     particles, optics = build_relion_star_tables(
         runs,
@@ -113,9 +156,11 @@ def write_array_tables(
         include_optics=_with_optics(layout),
         coordinates="centered",
     )
+    particles = _rename_tomograms(particles, names)
     path = particles_path(out_dir)
     if copick_layout == "import":
-        return write_relion_import_bundle(path, particles)
+        path, files = write_relion_import_bundle(path, particles)
+        return path, _files_by_run(files, names)
     if not runs:
         raise LookupError("no picks to export")
     os.makedirs(str(out_dir), exist_ok=True)
@@ -411,8 +456,9 @@ def export_selection_picks(
 
     The runs, their tomograms (geometry) and alignments come from the resolved selection (``portal_selection.json``);
     each run's annotation file is chosen by :func:`portal_api.choose` among the files on that alignment and voxel
-    spacing, and the manifest pins its id (copick's portal session id). ``rlnTomoName`` is the run name, which is the
-    portal run id in a portal-backed project and in the zarr-particle-tools import.
+    spacing, and the manifest pins its id (copick's portal session id). The manifest is keyed by run name (the portal
+    run id, as copick names the run); ``rlnTomoName`` is the name the zarr-particle-tools import gave the run
+    (:func:`portal_selection.tomo_name`), recorded per run as ``tomo_name``.
     """
     from . import portal_api
     from . import portal_selection as selection_io
@@ -428,6 +474,7 @@ def export_selection_picks(
         if unknown:
             raise LookupError(f"runs {unknown} are not in the selection {sorted(records)}")
         records = {name: records[name] for name in runs}
+    tomo_names = {name: selection_io.tomo_name(record) for name, record in records.items()}
     target_object = copick_object or object_name
     manifest = new_manifest("picks", job_type=job_type, session_id=session_id, user_id=user_id, config=str(config) if config else None)
     manifest["object"] = target_object
@@ -487,6 +534,7 @@ def export_selection_picks(
             picks_uri = _store_copick_picks(copick_root, name, target_object, user_id, session_id, pos_a, mats)
         manifest["runs"][name] = {
             "portal_run": record.get("run_name"),
+            "tomo_name": tomo_names[name],
             "n_picks": int(pos_a.shape[0]),
             "n_outside_volume": int((~inside).sum()),
             "oriented": oriented,
@@ -510,7 +558,7 @@ def export_selection_picks(
     if copick_root is None:
         manifest["notes"].append("picks were not stored in a copick project (storage not requested)")
     _, written = write_array_tables(out_dir, arrays_by_run, geometry_by_run, layout=layout,
-                                    tilt_series_pixel_sizes=tilt_pixel_sizes)
+                                    tilt_series_pixel_sizes=tilt_pixel_sizes, tomo_names=tomo_names)
     return _finish_manifest(manifest, out_dir=out_dir, layout=layout, files=written,
                             orientations="measured" if oriented_all else "identity_initialisation")
 
@@ -561,6 +609,7 @@ def export_copick_picks(
     filaments_uri: str | None = None,
     filament_angles: str = "frame",
     half_sets: str | None = None,
+    tomo_names: dict[str, str] | None = None,
 ) -> dict:
     """copick picks (``object:user/session``) -> ``particles.star`` (+ companions) by copick's export, + the manifest.
 
@@ -578,6 +627,9 @@ def export_copick_picks(
     half-maps. Otherwise
     the angles are the picks' own rotations: ``measured`` when any is not the identity, else an
     ``identity_initialisation`` (0, 0, 0).
+
+    ``tomo_names`` (``run -> rlnTomoName``; a portal-selection project's, from its project manifest) renames the rows
+    copick wrote under copick run names (:func:`_rename_written`); each run's record states its ``tomo_name``.
     """
     import copick  # lazy: only the picking environment has it
     from copick.ops.export import export_relion_particles
@@ -631,6 +683,10 @@ def export_copick_picks(
                 record["n_filaments"] = int(len(set(ids.tolist())))
         manifest["runs"][run.name] = record
         included.append(run.name)
+    names = _tomo_names_for([name for name in included if manifest["runs"][name]["n_picks"]], tomo_names)
+    for name in included:
+        if tomo_names and name in tomo_names:
+            manifest["runs"][name]["tomo_name"] = str(tomo_names[name])
 
     try:
         result = export_relion_particles(
@@ -651,6 +707,7 @@ def export_copick_picks(
         if int(result.rows.get(name, 0)) != manifest["runs"][name]["n_picks"]:
             raise RuntimeError(f"{name}: copick exported {result.rows.get(name, 0)} rows for {picks_uri} but the pick set "
                                f"holds {manifest['runs'][name]['n_picks']}; the STAR and the manifest would disagree")
+    files = _rename_written(out_dir, layout, result.files, names) if names else result.files
     if filament:
         _record_polarity(manifest, result, filaments_uri)
         manifest["filaments"].update(angles=filament_angles, half_sets=half_sets)
@@ -659,7 +716,28 @@ def export_copick_picks(
         orientations = "measured" if any(r.any() for r in rotations) else "identity_initialisation"
     manifest["tomogram_voxel_size_a"] = float(voxel_a)
     manifest["tilt_series_pixel_size_a"] = _tilt_pixel_size_record({r: tilt_by_run.get(r) for r in included}, layout, manifest)
-    return _finish_manifest(manifest, out_dir=out_dir, layout=layout, files=result.files, orientations=orientations)
+    return _finish_manifest(manifest, out_dir=out_dir, layout=layout, files=files, orientations=orientations)
+
+
+def _rename_written(out_dir: Path, layout: str, files: dict[str, str], names: dict[str, str]) -> dict[str, str]:
+    """What copick's export wrote under copick run names, written again by the same copick writers with ``names`` as
+    ``rlnTomoName``: the index bundle split anew (``coordinates/<rlnTomoName>.star`` in place of copick's per-run
+    files), or the flat table with its optics table as read. Returns the coordinate files keyed by copick run."""
+    from copick.util.formats import write_relion_import_bundle, write_star_particles
+
+    path = particles_path(out_dir)
+    if layout == LAYOUT_IMPORT_CENTERED:
+        tables = []
+        for run, coord in files.items():
+            block = starfile.read(coord, always_dict=True)
+            tables.append(as_table(block["particles"]).assign(rlnTomoName=names[run]))
+            os.remove(coord)
+        _, written = write_relion_import_bundle(path, pd.concat(tables, ignore_index=True))
+        return _files_by_run(written, names)
+    data = starfile.read(path, always_dict=True)
+    optics = as_table(data["optics"]) if "optics" in data else None
+    write_star_particles(path, _rename_tomograms(as_table(data["particles"]), names), optics)
+    return {}
 
 
 def _read_picks(run, object_name: str, user_id: str, session_id: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

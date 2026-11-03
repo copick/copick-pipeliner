@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 import starfile
 from click.testing import CliRunner
@@ -290,3 +291,29 @@ def test_cli_forwards_the_localization_controls(tmp_path, monkeypatch):
     args[args.index("--conversion-workers") + 1] = "0"
     args[args.index("--layout") + 1] = "flat"
     assert CliRunner().invoke(cli.main, args).exit_code != 0
+
+
+@pytest.mark.parametrize("layout", ["import_centered", "relion5"])
+def test_a_portal_selection_projects_star_carries_the_imports_tomo_names(chain, layout):
+    """copick names a portal-selection project's runs by portal run id; the import named their tomograms otherwise, and
+    the STAR copick wrote is written again with those names, every other value as copick wrote it."""
+    names = {run: f"run_{i}_tiltseries_1_alignment_2_spacing_3" for i, run in enumerate(CENTERS_ZYX)}
+    out = Path(f"AutoPick/named_{layout}")
+    manifest = export_copick_picks(
+        config=Path(CONFIG), out_dir=out, picks_uri="ribosome:octopi/job010", tomo_type="wbp", voxel_a=10.0,
+        layout=layout, runs=None, session_id="job020", job_type="copick.export", tilt_series_pixel_size_a=2.5,
+        tomo_names=names)
+    table = read_particles_star(out / "particles.star")
+    plain = read_particles_star(Path("AutoPick/job011/particles.star"))   # the same picks under copick run names
+    assert list(table["rlnTomoName"]) == [names[str(run)] for run in plain["rlnTomoName"]]
+    same = [c for c in plain.columns if c != "rlnTomoName"]
+    pd.testing.assert_frame_equal(table[same], plain[same])
+    assert {run: info["tomo_name"] for run, info in manifest["runs"].items()} == names
+    assert [manifest["runs"][r]["n_picks"] for r in ("r1", "r2", "r3")] == [2, 1, 0]
+    if layout == "import_centered":
+        assert manifest["coordinate_files"] == {r: f"{out}/coordinates/{names[r]}.star" for r in ("r1", "r2")}
+        assert sorted(p.name for p in (out / "coordinates").iterdir()) == [f"{names[r]}.star" for r in ("r1", "r2")]
+    else:
+        optics = starfile.read(out / "particles.star", always_dict=True)["optics"]
+        assert list(optics["rlnOpticsGroupName"]) == ["r1", "r2"]       # the optics groups keep copick's run names
+    assert orchestrate._project_tomo_names(Path(CONFIG)) == {}           # any other project: the copick run names

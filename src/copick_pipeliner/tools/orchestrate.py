@@ -113,8 +113,10 @@ def write_copick_portal_config(
 ) -> Path:
     """A copick ``cryoet_data_portal`` config: runs and tomograms stream from the portal, writes go to the overlay.
 
-    Runs are named by portal run id. The pickable objects are this chain's (inference writes them); deposited
-    annotations are read from the portal API by ``portal_picks``, not through copick's portal picks.
+    Runs are named by portal run id (copick's portal backend), which is not the ``rlnTomoName`` of the import: the
+    project manifest records that per run (``tomo_name``) for the STAR exports. The pickable objects are this chain's
+    (inference writes them); deposited annotations are read from the portal API by ``portal_picks``, not through
+    copick's portal picks.
     """
     config = {
         "name": name,
@@ -183,6 +185,19 @@ def _project_tilt_pixel_sizes(config_path: Path) -> dict[str, float | None]:
     except (FileNotFoundError, ValueError):
         return {}
     return {name: (info or {}).get("tilt_series_pixel_size_a") for name, info in runs.items()}
+
+
+def _project_tomo_names(config_path: Path) -> dict[str, str]:
+    """Per run, the ``rlnTomoName`` a STAR export writes for it when that is not the copick run name: a
+    portal-selection project's (the import's name, recorded by the project job; the run name for a project recorded
+    before it was). Empty for every other project, whose STAR carries the copick run names."""
+    try:
+        manifest = read_project_manifest(config_path)
+    except (FileNotFoundError, ValueError):
+        return {}
+    if (manifest.get("source") or {}).get("kind") != "portal-selection":
+        return {}
+    return {name: str((info or {}).get("tomo_name") or name) for name, info in (manifest.get("runs") or {}).items()}
 
 
 def resolve_runs(runs: str | list[str] | None) -> list[str] | None:
@@ -472,7 +487,8 @@ def _project_from_selection(
     """A portal-backed project for a resolved selection: config + manifest, no tomogram imported.
 
     Each run's pinned tomogram (portal id) is recorded with its geometry and the copick type it is read under; every
-    downstream job reads that type (``project_tomo_type``) at the selection's voxel spacing.
+    downstream job reads that type (``project_tomo_type``) at the selection's voxel spacing. Each run also records its
+    ``tomo_name`` (``portal_selection.tomo_name``), the ``rlnTomoName`` every STAR export of the project writes.
     """
     from . import portal_selection as selection_io
 
@@ -495,6 +511,7 @@ def _project_from_selection(
     types = {} if runner.dry_run else portal_tomogram_types(config_path, records)
     for name, record in records.items():
         manifest["runs"][name] = {
+            "tomo_name": selection_io.tomo_name(record),
             "tomogram": {
                 "tomogram_id": record["tomogram_id"],
                 "alignment_id": record["alignment_id"],
@@ -1062,7 +1079,7 @@ def localize(
     return export_copick_picks(
         config=config, out_dir=out_dir, picks_uri=picks_uri, tomo_type=tomo_type, voxel_a=voxel_a, layout=layout,
         runs=selected, session_id=session_id, job_type="copick.localize.octopi",
-        tilt_series_pixel_size_a=_project_tilt_pixel_sizes(config),
+        tilt_series_pixel_size_a=_project_tilt_pixel_sizes(config), tomo_names=_project_tomo_names(config),
         source={"kind": "copick-segmentation", "tool": "octopi", "segmentation_manifest": str(in_segmentation),
                 "segmentation_manifest_sha256": seg["manifest_sha256"], "segmentation_job_type": seg["job_type"],
                 "segmentation_uri": seg["segmentation_uri"], "segmentation_user": seg["user_id"],
@@ -1272,7 +1289,7 @@ def filament_picks(
         config=config, out_dir=out_dir, picks_uri=picks_uri, tomo_type=trace["tomo_type"], voxel_a=trace["voxel_size_a"],
         layout=layout, runs=selected, session_id=session_id, job_type="copick.filaments.picks", source=source,
         tilt_series_pixel_size_a=_project_tilt_pixel_sizes(config), filaments_uri=trace["filaments_uri"],
-        half_sets="filament")
+        half_sets="filament", tomo_names=_project_tomo_names(config))
     for run, info in manifest["runs"].items():
         info["n_traced_filaments"] = (trace["runs"].get(run) or {}).get("n_filaments")
     write_manifest(Path(out_dir) / PICKS_MANIFEST, manifest)
@@ -1424,7 +1441,7 @@ def filament_polarity(
         config=config, out_dir=out_dir, picks_uri=picks_uri, tomo_type=trace["tomo_type"], voxel_a=trace["voxel_size_a"],
         layout=layout, runs=selected, session_id=session_id, job_type="copick.filaments.polarity", source=source,
         tilt_series_pixel_size_a=_project_tilt_pixel_sizes(config), filaments_uri=output_uri,
-        filament_angles="pose", half_sets="filament")
+        filament_angles="pose", half_sets="filament", tomo_names=_project_tomo_names(config))
     per_run = {}
     for run in selected:
         per_run[run] = {"n_filaments_in": (trace["runs"].get(run) or {}).get("n_filaments"), **calls[run],
@@ -1542,6 +1559,7 @@ def boundary(
                 "input_orientations": upstream.get("orientations"),
                 "boundary_model": model, "boundary_voxel_size_a": boundary_voxel_a, "sample_segmentation": sample_uri,
                 "voxel_size_requested_a": requested_voxel_a, "voxel_size_used_a": voxel_a, "boundary_recovery": boundary_recovery},
+        tomo_names=_project_tomo_names(config),
     )
     for run, info in manifest["runs"].items():
         n_in = (upstream.get("runs", {}).get(run) or {}).get("n_picks")

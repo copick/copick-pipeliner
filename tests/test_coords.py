@@ -7,6 +7,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+import starfile
 from scipy.spatial.transform import Rotation
 
 from copick_pipeliner.tools import coords, export_star
@@ -67,6 +68,40 @@ def test_both_layouts_carry_native_centered_columns_only(tmp_path, layout):
     values = table.loc[1, list(coords.CENTERED_COLUMNS)].to_numpy(dtype=float)   # the second point is the center
     assert np.allclose(values, 0.0)
     assert np.allclose(table.loc[:, list(coords.EULER_COLUMNS)].to_numpy(dtype=float), 0.0)
+
+
+@pytest.mark.parametrize("layout", coords.LAYOUTS)
+def test_tomo_names_rename_the_rows_and_coordinate_files_never_the_runs(tmp_path, layout):
+    """A portal-selection project: copick names runs by portal run id, the import names the tomograms otherwise."""
+    geometry = coords.VolumeGeometry(dims_xyz=(100, 200, 300), voxel_a=10.0)
+    arrays = {"16848": (np.array([[500.0, 1000.0, 1500.0]]), None),
+              "16849": (np.array([[100.0, 200.0, 300.0]] * 2), None)}
+    names = {run: f"run_{run}_tiltseries_1_alignment_2_spacing_3" for run in arrays}
+    geometries, tilt = {run: geometry for run in arrays}, {run: 2.5 for run in arrays}
+    out = tmp_path / "named"
+    _, files = export_star.write_array_tables(out, arrays, geometries, layout=layout, tilt_series_pixel_sizes=tilt,
+                                              tomo_names=names)
+    table = export_star.read_particles_star(out / export_star.PARTICLES_STAR)
+    assert list(table["rlnTomoName"]) == [names["16848"], names["16849"], names["16849"]]
+    plain = _table(arrays, geometries, layout=layout, tmp_path=tmp_path, tilt=tilt)
+    pd.testing.assert_frame_equal(table.drop(columns="rlnTomoName"), plain.drop(columns="rlnTomoName"))
+    if layout == coords.LAYOUT_IMPORT_CENTERED:   # keyed by copick run, named after the rlnTomoName they hold
+        assert files == {run: f"{out}/coordinates/{name}.star" for run, name in names.items()}
+    if layout == coords.LAYOUT_RELION5:           # the optics groups keep the copick run names
+        optics = starfile.read(out / export_star.PARTICLES_STAR, always_dict=True)["optics"]
+        assert list(optics["rlnOpticsGroupName"].astype(str)) == ["16848", "16849"]
+
+
+def test_a_run_the_tomo_names_miss_or_share_is_refused(tmp_path):
+    geometry = coords.VolumeGeometry(dims_xyz=(10, 10, 10), voxel_a=1.0)
+    arrays = {"a": (np.zeros((1, 3)), None), "b": (np.zeros((1, 3)), None), "empty": (np.zeros((0, 3)), None)}
+    write = lambda names: export_star.write_array_tables(
+        tmp_path, arrays, {r: geometry for r in arrays}, layout=coords.LAYOUT_IMPORT_CENTERED,
+        tilt_series_pixel_sizes={}, tomo_names=names)
+    with pytest.raises(LookupError, match=r"\['b'\]"):     # a run without picks needs no name
+        write({"a": "x"})
+    with pytest.raises(ValueError, match="one rlnTomoName"):
+        write({"a": "x", "b": "x"})
 
 
 def test_centered_angstrom_for_a_real_10426_point(tmp_path):
