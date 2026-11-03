@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/copick/copick-pipeliner/compare/copick-pipeliner-v0.5.0...copick-pipeliner-v0.5.1) (2026-11-03)
+
+
+### 🐞 Bug Fixes
+
+* write the import's rlnTomoName on portal-selection projects ([#16](https://github.com/copick/copick-pipeliner/issues/16)) ([1e49fdd](https://github.com/copick/copick-pipeliner/commit/1e49fddbb265e28fa214551378a64061689c2f71))
+
 ## [0.5.0](https://github.com/copick/copick-pipeliner/compare/copick-pipeliner-v0.4.0...copick-pipeliner-v0.5.0) (2026-10-27)
 
 
